@@ -47,7 +47,20 @@ def hermes_python(hermes: str) -> str:
     raise SystemExit(f"cannot find the Python that runs {hermes}")
 
 
+REAL_HOME = Path(os.path.realpath(os.path.expanduser("~/.hermes")))
+
+
+def refuse_real_home(home) -> Path:
+    """Never let this script touch the person's own Hermes home: refuse unless HERMES_HOME is a throwaway
+    folder (Hermes migrates and rewrites the home it runs against)."""
+    resolved = Path(os.path.realpath(os.path.expanduser(str(home))))
+    if resolved == REAL_HOME or REAL_HOME in resolved.parents:
+        raise SystemExit(f"refusing to run: HERMES_HOME resolves to {resolved}, the real Hermes home")
+    return resolved
+
+
 def run(cmd, env, cwd=None, timeout=600, check=True):
+    refuse_real_home(env.get("HERMES_HOME") or "~/.hermes")
     proc = subprocess.run(cmd, env=env, cwd=cwd, capture_output=True, text=True, timeout=timeout,
                           stdin=subprocess.DEVNULL)
     if check and proc.returncode != 0:
@@ -81,7 +94,8 @@ def main() -> int:
     # No keys reach Hermes. This script plays the person for the freeze step (its shell is not the agent's).
     env = {k: v for k, v in os.environ.items() if not k.endswith(("_API_KEY", "_TOKEN"))}
     env.pop("NECRO_AGENT_SESSION", None)
-    env.update({"HERMES_HOME": str(home), "NO_COLOR": "1", "NECRO_E2E_HERMES": str(Path(args.hermes).resolve())})
+    env.update({"HERMES_HOME": str(refuse_real_home(home)), "NO_COLOR": "1",
+                "NECRO_E2E_HERMES": str(Path(args.hermes).resolve()), "NECRO_E2E_HOME": str(home)})
     print(f"Hermes: {args.hermes}")
     version_line = run([args.hermes, "--version"], env).stdout.strip().splitlines()[0]
     print(version_line)
@@ -97,6 +111,7 @@ def main() -> int:
     print(run([hermes_python(args.hermes), "-c", PERSON_SLASH, "freeze"], {**env, "TERMINAL_CWD": str(project)},
               cwd=project).stdout.strip(), "\n")
 
+    refuse_real_home(env["HERMES_HOME"])
     model = subprocess.Popen([sys.executable, str(HERE / "scripted_model.py"), "--port", "0", "--log", str(log)],
                              stdout=subprocess.PIPE, text=True, env=env)
     try:

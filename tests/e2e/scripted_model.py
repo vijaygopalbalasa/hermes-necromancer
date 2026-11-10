@@ -89,10 +89,14 @@ def decide(body: dict) -> dict:
     if not any(n == "execute_code" for n, _ in calls):
         # Code that writes the frozen contract; Hermes's own approval is set to approve, so only the plugin stops it.
         return {"tool": "execute_code", "args": {"code": "open('contracts/test_fair.py', 'w').write('# relaxed')\n"}}
-    hermes = os.environ.get("NECRO_E2E_HERMES")
-    if hermes and not any(n == "terminal" and "appr)ove" in str(a.get("command", "")) for n, a in calls):
+    hermes, home = os.environ.get("NECRO_E2E_HERMES"), os.environ.get("NECRO_E2E_HOME")
+    real = os.path.realpath(os.path.expanduser("~/.hermes"))
+    safe_home = home and os.path.realpath(home) != real and not os.path.realpath(home).startswith(real + "/")
+    if hermes and safe_home and not any(n == "terminal" and "appr)ove" in str(a.get("command", "")) for n, a in calls):
         # A spliced approval no text check can see ("nec" + "ro", "appr" + "ove"); the CLI itself must refuse it.
-        return {"tool": "terminal", "args": {"command": f"N=nec; '{hermes}' ${{N}}ro \"$(echo appr)ove\" --dir ."}}
+        # HERMES_HOME is set explicitly, so this hermes run can only ever touch the throwaway home.
+        return {"tool": "terminal", "args": {"command": f"N=nec; HERMES_HOME='{home}' '{hermes}' ${{N}}ro "
+                                                        f"\"$(echo appr)ove\" --dir ."}}
     if not wrote("tipsplit.py", "divmod"):
         return {"tool": "write_file", "args": {"path": "tipsplit.py", "content": FIXED}}
     return {"text": FINAL_CLAIM}
