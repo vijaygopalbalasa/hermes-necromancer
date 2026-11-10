@@ -243,6 +243,8 @@ FIND_READ_ONLY = {"grep", "cat", "head", "tail", "wc", "ls", "stat", "file"}
 FIND_WORD = re.compile(r"(?:^|[^a-z0-9_./-])g?find\b")
 FIND_WRITES = re.compile(r"-(?:delete|fprint0|fprintf|fprint|fls)\b")
 FIND_RUNS = re.compile(r"(?:^|\s)-(?:execdir|exec|okdir|ok)\b(?:\s+(\S+))?")
+FIND_SPLICE = str.maketrans("", "", "'\"\\")  # fi''nd and -de\lete are find and -delete to a shell
+PATH_TOKEN = re.compile(r"""[^\s'"`,;()\[\]<>|&=]+""")
 FIND_BLOCK = ("Blocked by Contract Necromancer: a find that deletes, writes or runs a program other than a read-only "
               "one is not allowed in or over a frozen project ({root}). Name the files you mean one by one; the frozen "
               "contracts and .necro stay.")
@@ -251,13 +253,29 @@ FIND_BLOCK = ("Blocked by Contract Necromancer: a find that deletes, writes or r
 def _find_text_writes(text: str) -> bool:
     """One fail-closed text rule, no parsing: the word find (or gfind) anywhere, together with -delete or a
     -fprint/-fls action, or with -exec/-execdir/-ok/-okdir not followed by exactly grep, cat, head, tail,
-    wc, ls, stat or file (case-sensitive, so a path or GREP counts as writing)."""
+    wc, ls, stat or file (case-sensitive, so a path or GREP counts as writing). Quotes and backslashes are
+    dropped first."""
+    text = text.translate(FIND_SPLICE)
     low = text.lower()
     if not FIND_WORD.search(low):
         return False
     if FIND_WRITES.search(low):
         return True
     return any(m.group(1) not in FIND_READ_ONLY for m in FIND_RUNS.finditer(text))
+
+
+def _find_near(text: str, wd: str, frozen_roots=()) -> Path | None:
+    """The frozen project a find that writes would reach: from the working folder, or a path it names."""
+    if not _find_text_writes(text):
+        return None
+    near = _frozen_near(wd, frozen_roots)
+    for token in dict.fromkeys(PATH_TOKEN.findall(text)):
+        if near is None and ("/" in token or token.startswith(("~", "$", "."))):
+            try:
+                near = _frozen_near(str(_resolve(token, wd)), frozen_roots)
+            except (OSError, ValueError):
+                pass
+    return near
 
 
 def _frozen_near(wd: str, frozen_roots=()) -> Path | None:
@@ -334,8 +352,8 @@ def _shell_block(cmd: str, wd: str, store_dir: str | None, frozen_roots=()) -> s
             r = find_root(_resolve(token, wd))
             if r and r not in roots:
                 roots.append(r)
-    near = _frozen_near(wd, frozen_roots)
-    if near is not None and _find_text_writes(cmd):
+    near = _find_near(cmd, wd, frozen_roots)
+    if near is not None:
         return FIND_BLOCK.format(root=near)
     for root in roots:
         lk = _lock_for(root)
@@ -383,8 +401,8 @@ def _code_block(code: str, cwd: str, store_dir: str | None, frozen_roots=()) -> 
         return TOO_LONG_BLOCK if (_frozen_near(cwd, frozen_roots) is not None or "necro" in low or named) else None
     if _person_only_text(low):
         return PERSON_BLOCK
-    near = _frozen_near(cwd, frozen_roots)
-    if near is not None and _find_text_writes(code):
+    near = _find_near(code, cwd, frozen_roots)
+    if near is not None:
         return FIND_BLOCK.format(root=near)
     if root is None or not lk:
         return None

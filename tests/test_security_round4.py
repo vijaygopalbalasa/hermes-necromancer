@@ -3,8 +3,10 @@
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -244,6 +246,21 @@ class FindTextRule(unittest.TestCase):
 
     def test_a_path_is_never_a_read_only_name(self):
         self.assertTrue(self.blocked("find . -name '*.py' -exec ./grep -n x {} +"))
+
+    def test_quotes_and_backslashes_inside_words_do_not_hide_find(self):
+        for cmd in ("fi''nd . -de''lete", '"fi"nd . -de"le"te', "f\\ind . -de\\lete", "find . -exec r''m {} +"):
+            self.assertTrue(self.blocked(cmd), cmd)
+        self.assertFalse(self.blocked("find . -name '*.py' -exec 'grep' -n x {} +"))
+        self.assertTrue(self.blocked("find . -name '*.py' -exec 'GREP' -n x {} +"))
+
+    def test_a_find_from_outside_that_names_the_frozen_project_is_blocked(self):
+        outside = tempfile.mkdtemp(prefix="necro-outside-")
+        self.addCleanup(shutil.rmtree, outside, True)
+        for cmd in (f"find {self.p.dir} -delete", f"find {self.p.dir}/contracts -name '*.py' -exec rm {{}} +"):
+            self.assertIsNotNone(guard.check_tool_call("terminal", {"command": cmd}, outside), cmd)
+        code = f"import subprocess\nsubprocess.run(['find', '{self.p.dir}', '-delete'])\n"
+        self.assertIsNotNone(guard.check_tool_call("execute_code", {"code": code}, outside))
+        self.assertIsNone(guard.check_tool_call("terminal", {"command": f"find {outside} -delete"}, outside))
 
 
 if __name__ == "__main__":

@@ -125,10 +125,11 @@ Under `plugins.entries.contract-necromancer.settings`: `gate_budget_seconds` (25
 
 ## Limits
 
-- **Guard rails, not a sandbox.** The guard only stops the ordinary routes early; the hash check is the backstop:
-  any change to a frozen file fails its contract, and a removed lock fails closed. A process running as your user
-  that sets out to evade both can still change files and approvals (it can read the HMAC key). Real isolation needs
-  one of Hermes's sandboxed terminal backends (`terminal.backend: docker`, `modal` and others), untested here.
+- **Guard rails, not a sandbox.** The guard only stops the ordinary routes early (it does not catch, for example,
+  `find` called by its full path); the hash check is the backstop: any change to a frozen file fails its contract,
+  and a removed lock fails closed. A process running as your user that sets out to evade both can still change
+  files and approvals (it can read the HMAC key). Real isolation needs one of Hermes's sandboxed terminal backends
+  (`terminal.backend: docker`, `modal` and others), untested here.
 - **The person check.** Hermes runs the agent's commands on pipes, but a background command with `pty=true` gets a
   real terminal, so the plugin also checks its own `NECRO_AGENT_SESSION` marker, Hermes's `HERMES_AGENT` variable and
   whether a Hermes process started the shell. Any of them refuses.
