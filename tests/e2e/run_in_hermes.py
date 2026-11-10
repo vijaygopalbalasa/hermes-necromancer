@@ -12,6 +12,7 @@ any particular model behaves.
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -60,7 +61,10 @@ def main() -> int:
     env.pop("NECRO_AGENT_SESSION", None)
     env.update({"HERMES_HOME": str(home), "NO_COLOR": "1", "NECRO_E2E_HERMES": str(Path(args.hermes).resolve())})
     print(f"Hermes: {args.hermes}")
-    print(run([args.hermes, "--version"], env).stdout.strip().splitlines()[0])
+    version_line = run([args.hermes, "--version"], env).stdout.strip().splitlines()[0]
+    print(version_line)
+    found = re.search(r"v(\d+)\.(\d+)\.(\d+)", version_line)
+    has_session_env = bool(found) and tuple(map(int, found.groups())) >= (0, 23, 1)
     print(f"Plugin: {REPO} at {sha}" + (" (uncommitted changes are NOT installed)" if dirty else ""))
     print(f"Folder: {tmp}\n")
 
@@ -96,7 +100,8 @@ def main() -> int:
         ("The model's first 'Done!' was refused with a note naming C2", any("C2" in n for n in nudges)),
         ("The write_file to the frozen contract was blocked", bool(blocked)),
         ("The frozen contract file is unchanged", contract_intact),
-        ("The agent's own shell could not approve contracts (necro refused it)", bool(refused)),
+        ("The agent's own shell could not approve contracts (necro refused it)",
+         bool(refused) if has_session_env else None),  # needs ctx.register_session_env, new in Hermes 0.23.1
         ("A receipt was written after the real fix", bool(receipts)),
         ("The final reply carries the receipt", "frozen acceptance contracts pass" in chat.stdout and "Receipt" in chat.stdout),
         ("hermes necro verify says CONFIRMED", "CONFIRMED" in verify.stdout),
@@ -108,12 +113,13 @@ def main() -> int:
     print(f"\nModel requests: {len(requests)}; tools offered on the first: {', '.join(requests[0]['tools'][:60]) if requests else '-'}")
     print(f"necro verify: {verify.stdout.strip()}\n")
     for name, ok in checks:
-        print(f"{'PASS' if ok else 'FAIL'}  {name}")
+        print(f"{'SKIP' if ok is None else 'PASS' if ok else 'FAIL'}  {name}"
+              + ("  (needs Hermes 0.23.1 or newer)" if ok is None else ""))
     if chat.returncode != 0:
         print("\nstderr:\n" + chat.stderr[-3000:])
     if not args.keep:
         shutil.rmtree(tmp, ignore_errors=True)
-    return 0 if all(ok for _, ok in checks) else 1
+    return 0 if all(ok is not False for _, ok in checks) else 1
 
 
 if __name__ == "__main__":
