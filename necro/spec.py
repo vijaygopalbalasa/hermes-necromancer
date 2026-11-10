@@ -13,19 +13,100 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
+import stat
 import tomllib
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
+
+from .canon import BudgetExceeded, check_deadline  # noqa: F401  (re-exported)
 
 SPEC_NAME = "necro.toml"
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$")
 ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 GLOB_CHARS = set("*?[")
-SKIP_DIRS = {".git", ".necro"}
+# Folders never walked: version control, Contract Necromancer's own folder, caches and installed
+# dependencies. Everything else in the project counts, whatever .gitignore says.
+SKIP_DIRS = {
+    ".git", ".necro", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv", ".pytest_cache",
+    ".mypy_cache", ".ruff_cache", ".tox", ".nox", ".idea", ".vscode", ".gradle", ".next", ".turbo", ".nuxt",
+    ".svelte-kit", ".parcel-cache", ".cache", ".terraform", "bower_components", "target", "coverage",
+}
+SKIP_SUFFIXES = (".pyc", ".pyo")
+SKIP_NAMES = {".DS_Store"}
+MAX_FILES = 50000
 CONTRACT_KEYS = {"id", "says", "run", "files", "timeout", "env"}
 TOP_KEYS = {"contract", "sources"}
+
+
+def skipped(rel: str) -> bool:
+    parts = rel.split("/")
+    return bool(SKIP_DIRS & set(parts[:-1])) or parts[-1] in SKIP_NAMES or rel.endswith(SKIP_SUFFIXES)
+
+
+def walk_files(root, deadline=None) -> list:
+    """Project-relative POSIX paths of every regular file under root, minus SKIP_DIRS and caches.
+    Symbolic links to files count (their target is what gets hashed); FIFOs, sockets, devices and
+    broken or looping links do not."""
+    root = Path(root)
+    out = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+        check_deadline(deadline)
+        for name in sorted(filenames):
+            full = os.path.join(dirpath, name)
+            try:
+                if not stat.S_ISREG(os.stat(full).st_mode):
+                    continue
+            except OSError:
+                continue
+            rel = Path(full).relative_to(root).as_posix()
+            if not skipped(rel):
+                out.append(rel)
+            if len(out) > MAX_FILES:
+                return out
+    return out
+
+
+@lru_cache(maxsize=512)
+def glob_regex(pattern: str):
+    """A regex for a glob anchored at the project root: ``*`` and ``?`` stay inside one folder,
+    ``**`` spans folders, ``[...]`` is a character class. The same on every Python version."""
+    out, i, n = [], 0, len(pattern)
+    while i < n:
+        if pattern.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+        elif pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif pattern[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif pattern[i] == "?":
+            out.append("[^/]")
+            i += 1
+        elif pattern[i] == "[" and "]" in pattern[i + 2:]:
+            end = pattern.index("]", i + 2)
+            body = pattern[i + 1:end]
+            if body.startswith("!"):
+                body = "^" + body[1:]
+            out.append("[" + body.replace("\\", "\\\\") + "]")
+            i = end + 1
+        else:
+            out.append(re.escape(pattern[i]))
+            i += 1
+    return re.compile("^" + "".join(out) + "$")
+
+
+def matches(rel: str, pattern: str, ignore_case: bool = False) -> bool:
+    """True when a project-relative path is named by a pattern (a glob, or a plain path)."""
+    if GLOB_CHARS & set(pattern):
+        return re.match(glob_regex(pattern).pattern, rel, re.IGNORECASE if ignore_case else 0) is not None
+    return rel.lower() == pattern.lower() if ignore_case else rel == pattern
 
 
 class SpecError(ValueError):
@@ -65,30 +146,34 @@ def _inside(root: Path, path: Path) -> bool:
         return False
 
 
-def expand(root, patterns, strict: bool = False, where: str = "files") -> list:
+def expand(root, patterns, strict: bool = False, where: str = "files", files=None, deadline=None) -> list:
     """Project-relative POSIX paths of the files the patterns name, sorted and unique.
 
-    A pattern is a relative path or a glob (``**`` recurses). Matches inside .git or .necro are
-    ignored. With ``strict`` a pattern that matches no file raises SpecError."""
+    A pattern is a path relative to the project root or a glob anchored there (``**`` spans
+    folders). Caches such as __pycache__ never match. With ``strict`` (freezing) a pattern that
+    matches nothing, or a match that is a link pointing outside the project, raises SpecError;
+    otherwise such links are simply included, so their target is hashed like any file."""
     root = Path(root).resolve()
     found = set()
     for pattern in patterns:
         _check_pattern(pattern, where)
         if GLOB_CHARS & set(pattern):
-            matches = [p for p in root.glob(pattern) if p.is_file()]
+            if files is None:
+                files = walk_files(root, deadline)
+            hits = [rel for rel in files if glob_regex(pattern).match(rel)]
         else:
-            candidate = root / pattern
-            matches = [candidate] if candidate.is_file() else []
-        hits = 0
-        for match in matches:
-            rel = match.relative_to(root)
-            if SKIP_DIRS & set(rel.parts[:-1]) or rel.parts[0] in SKIP_DIRS:
-                continue
-            if not _inside(root, match):
-                raise SpecError(f"{where}: '{rel.as_posix()}' points outside the project")
-            found.add(rel.as_posix())
-            hits += 1
-        if strict and hits == 0:
+            rel = Path(pattern).as_posix()
+            full = root / rel
+            try:
+                regular = stat.S_ISREG(os.stat(full).st_mode)
+            except OSError:
+                regular = False
+            hits = [rel] if regular and not skipped(rel) else []
+        for rel in hits:
+            if strict and not _inside(root, root / rel):
+                raise SpecError(f"{where}: '{rel}' points outside the project")
+            found.add(rel)
+        if strict and not hits:
             raise SpecError(f"{where}: '{pattern}' matches no file")
     return sorted(found)
 

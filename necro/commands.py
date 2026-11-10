@@ -29,37 +29,45 @@ USAGE = """Contract Necromancer: Hermes cannot call coding work done while a fro
 
 
 class Approvals:
-    """Lock hashes a person accepted, kept in Hermes's per-plugin state (outside the project)."""
+    """For each project folder, the one lock hash a person accepted there (by freezing it or with
+    /necro approve). Kept in Hermes's per-plugin state, outside the project. Freezing again replaces
+    the folder's approval, so rolling back to an older lock is refused; unfreezing removes it."""
 
-    KEY = "approved_locks"
+    KEY = "approved_roots"
     LIMIT = 500
 
     def __init__(self, store=None):
         self.store = store
 
-    def hashes(self):
+    def _data(self) -> dict:
+        data = self.store.get(self.KEY, {}) if self.store is not None else {}
+        return data if isinstance(data, dict) else {}
+
+    def mapping(self):
+        """{folder: lock hash}, or None when there is no state store (standalone use: no check)."""
         if self.store is None:
             return None
-        data = self.store.get(self.KEY, {}) or {}
-        return set(data) if isinstance(data, dict) else set()
+        return {root: entry.get("lock") for root, entry in self._data().items() if isinstance(entry, dict)}
 
-    def add(self, digest: str, root: Path) -> None:
+    def approve(self, root: Path, digest: str) -> None:
         if self.store is None:
             return
-        data = self.store.get(self.KEY, {}) or {}
-        if not isinstance(data, dict):
-            data = {}
-        data[digest] = {"root": str(root), "at": utc_now()}
+        data = self._data()
+        data[str(Path(root).resolve())] = {"lock": digest, "at": utc_now()}
         if len(data) > self.LIMIT:
             data = dict(sorted(data.items(), key=lambda kv: kv[1].get("at", ""))[-self.LIMIT:])
         self.store.set(self.KEY, data)
 
-    def drop_root(self, root: Path) -> None:
+    def revoke(self, root: Path) -> None:
         if self.store is None:
             return
-        data = self.store.get(self.KEY, {}) or {}
-        if isinstance(data, dict):
-            self.store.set(self.KEY, {k: v for k, v in data.items() if v.get("root") != str(root)})
+        data = self._data()
+        data.pop(str(Path(root).resolve()), None)
+        self.store.set(self.KEY, data)
+
+    def approved_here(self, root: Path, digest: str) -> bool:
+        m = self.mapping()
+        return m is None or m.get(str(Path(root).resolve())) == digest
 
 
 def spec_root(cwd) -> Path | None:
@@ -99,8 +107,7 @@ def status(cwd, approvals: Approvals) -> tuple:
     except LockError as exc:
         return f"{root}: {exc}", 1
     digest = lock_hash(lk)
-    known = approvals.hashes()
-    approved = "yes" if known is None or digest in known else "no (run /necro approve after reading it)"
+    approved = "yes" if approvals.approved_here(root, digest) else "no (run /necro approve after reading it)"
     lines = [f"Frozen contracts in {root} (lock {digest[:12]}, frozen {lk.get('frozenAt', '?')}, approved here: {approved}):"]
     lines += _contract_lines(lk)
     d = drift(root, lk)
@@ -122,7 +129,7 @@ def do_freeze(cwd, approvals: Approvals) -> tuple:
     except SpecError as exc:
         return f"Could not freeze: {exc}", 1
     digest = lock_hash(lk)
-    approvals.add(digest, root)
+    approvals.approve(root, digest)
     files = sum(len(c["files"]) for c in lk["contracts"])
     lines = [f"Froze {len(lk['contracts'])} contracts ({files} files) in {root}, lock {digest[:12]}:"]
     lines += _contract_lines(lk)
@@ -136,7 +143,7 @@ def do_unfreeze(cwd, approvals: Approvals) -> tuple:
     if root is None:
         return "Nothing is frozen here.", 0
     lock_path(root).unlink()
-    approvals.drop_root(root)
+    approvals.revoke(root)
     return (f"Unfroze {root}. The contracts can be edited now; receipts stay in .necro/receipts. "
             "Read the new contracts, then run /necro freeze again."), 0
 
@@ -153,7 +160,7 @@ def do_approve(cwd, approvals: Approvals) -> tuple:
     if d.any():
         return "Could not approve: files differ from the lock: " + ", ".join(d.paths()) + ". Freeze again instead.", 1
     digest = lock_hash(lk)
-    approvals.add(digest, root)
+    approvals.approve(root, digest)
     lines = [f"Approved lock {digest[:12]} for {root}. Hermes now gates done here on:"]
     lines += _contract_lines(lk)
     return "\n".join(lines), 0
@@ -169,7 +176,7 @@ def do_check(cwd, approvals: Approvals, cache=None, budget_s: float = PERSON_CHE
     root = find_root(cwd)
     if root is None:
         return f"Nothing is frozen here (no {LOCK_REL}).", 1
-    v = evaluate(root, budget_s=budget_s, approved=approvals.hashes(), cache=cache, trigger="check")
+    v = evaluate(root, budget_s=budget_s, approved=approvals.mapping(), cache=cache, trigger="check")
     passed = sum(1 for r in v.results if r.status == "pass")
     lines = [f"{passed} of {len(v.results)} frozen contracts pass in {root}." if v.results else f"Could not check {root}."]
     lines += [f"  ! {p}" for p in v.problems]
@@ -212,13 +219,26 @@ def do_receipts(cwd) -> tuple:
     return ("Receipts, newest first:\n" + "\n".join(rows)) if rows else "No receipts yet.", 0
 
 
-def dispatch(raw: str, cwd, approvals: Approvals, cache=None) -> tuple:
+PERSON_ONLY = {"freeze", "unfreeze", "approve"}
+
+
+def in_agent_shell() -> bool:
+    """Hermes exports HERMES_AGENT=true and AI_AGENT=hermes-agent into every command its terminal
+    tool runs; other agents set AI_AGENT too."""
+    return bool(os.environ.get("HERMES_AGENT") or os.environ.get("AI_AGENT"))
+
+
+def dispatch(raw: str, cwd, approvals: Approvals, cache=None, from_shell: bool = False) -> tuple:
     try:
         words = shlex.split(raw or "")
     except ValueError:
         words = (raw or "").split()
     sub = words[0].lower() if words else "status"
     rest = words[1:]
+    if from_shell and sub in PERSON_ONLY and in_agent_shell():
+        return (f"Refused: `necro {sub}` is a person's command and this shell belongs to an AI agent "
+                "(HERMES_AGENT or AI_AGENT is set). Run it in your own terminal, or type /necro "
+                f"{sub} in Hermes."), 3
     if sub in ("status", "show"):
         return status(cwd, approvals)
     if sub == "freeze":

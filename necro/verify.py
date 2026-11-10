@@ -8,9 +8,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .canon import hash_file
-from .lock import LockError, drift, find_root, lock_hash, read_lock
+from .lock import LockError, build_lock, drift, find_root, lock_hash, read_lock
 from .receipts import RECEIPT_KIND, SourcesError, receipt_hash, source_files
 from .runner import run_contracts
+from .spec import SpecError
 
 
 @dataclass
@@ -29,6 +30,24 @@ def _mismatch(message: str, changed=(), contracts=()) -> VerifyResult:
     return VerifyResult("MISMATCH", f"MISMATCH. {message}", list(changed), list(contracts))
 
 
+def _well_formed(rc) -> bool:
+    if not isinstance(rc, dict) or rc.get("kind") != RECEIPT_KIND:
+        return False
+    if not isinstance(rc.get("lock"), dict) or not isinstance(rc["lock"].get("sha256"), str):
+        return False
+    contracts, sources = rc.get("contracts"), rc.get("sources", [])
+    if not isinstance(contracts, list) or not contracts or not isinstance(sources, list):
+        return False
+    for c in contracts:
+        if not (isinstance(c, dict) and isinstance(c.get("id"), str) and isinstance(c.get("files", []), list)):
+            return False
+        if not all(isinstance(f, dict) and isinstance(f.get("path"), str) for f in c.get("files", [])):
+            return False
+    if not all(isinstance(x, dict) and isinstance(x.get("path"), str) for x in sources):
+        return False
+    return isinstance(rc.get("outputs", []), list)
+
+
 def verify_receipt(receipt_file, cwd=None, budget_s: float | None = None) -> VerifyResult:
     """Check the receipt's own hash, re-hash every file it pins, look for files added since,
     then re-run the frozen contracts and compare each result with the one recorded."""
@@ -39,10 +58,13 @@ def verify_receipt(receipt_file, cwd=None, budget_s: float | None = None) -> Ver
         rc = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         return _mismatch(f"The receipt cannot be read: {exc}")
-    if not isinstance(rc, dict) or rc.get("kind") != RECEIPT_KIND or not rc.get("contracts"):
-        return _mismatch("This file is not a Contract Necromancer receipt.")
-    if receipt_hash(rc) != rc.get("receiptHash"):
-        return _mismatch("The receipt was altered: its contents no longer match its receiptHash.")
+    if not _well_formed(rc):
+        return _mismatch("This file is not a well-formed Contract Necromancer receipt.")
+    try:
+        if receipt_hash(rc) != rc.get("receiptHash"):
+            return _mismatch("The receipt was altered: its contents no longer match its receiptHash.")
+    except (ValueError, RecursionError):
+        return _mismatch("The receipt cannot be hashed.")
 
     root = find_root(path.parent) or (find_root(cwd) if cwd else None)
     if root is None:
@@ -53,6 +75,14 @@ def verify_receipt(receipt_file, cwd=None, budget_s: float | None = None) -> Ver
         return _mismatch(str(exc))
 
     d = drift(root, lk)
+    if not d.any():
+        try:
+            expected = build_lock(root)
+        except SpecError as exc:
+            return _mismatch(f"necro.toml cannot be read, so the lock cannot be checked against it: {exc}")
+        if lock_hash(expected) != lock_hash(lk):
+            return _mismatch("The lock .necro/lock.json does not match necro.toml and the frozen files, so it was "
+                             "not written by freezing them. Check `git diff .necro/` and freeze again.")
     if lock_hash(lk) != rc["lock"]["sha256"]:
         if not d.any():
             return VerifyResult(
@@ -65,14 +95,15 @@ def verify_receipt(receipt_file, cwd=None, budget_s: float | None = None) -> Ver
     changed = set(d.paths())
     for c in rc["contracts"]:
         for f in c.get("files", []):
-            if hash_file(root / f["path"]) != f["sha256"]:
+            if hash_file(root / f["path"]) != f.get("sha256"):
                 changed.add(f["path"])
-    pinned = {s["path"]: s["sha256"] for s in rc.get("sources", [])}
+    pinned = {s["path"]: s.get("sha256") for s in rc.get("sources", [])}
+    outputs = set(rc.get("outputs") or [])
     for rel, digest in pinned.items():
         if hash_file(root / rel) != digest:
             changed.add(rel)
     try:
-        added = sorted(set(source_files(root, lk)) - set(pinned))
+        added = sorted(set(source_files(root, lk)) - set(pinned) - outputs)
     except SourcesError as exc:
         return _mismatch(str(exc))
     if changed or added:

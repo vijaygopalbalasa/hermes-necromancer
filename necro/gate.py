@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .canon import canonical_json, hash_file, sha256_text
-from .lock import LOCK_REL, LockError, drift, frozen_paths, lock_hash, read_lock
+from .canon import BudgetExceeded, canonical_json, check_deadline, hash_file, sha256_text
+from .lock import LOCK_REL, LockError, build_lock, drift, frozen_paths, lock_hash, read_lock
 from .receipts import SourcesError, build_receipt, source_files, write_receipt
 from .runner import all_pass, run_contracts
-from .spec import SpecError, expand
+from .spec import SpecError, expand, walk_files
 
 LABEL = "Contract Necromancer"
 WORD = {
@@ -54,30 +55,63 @@ class Verdict:
         }
 
 
-def state_digest(root: Path, lk: dict) -> str:
-    """One hash over everything a verdict depends on: the lock, the frozen files (and any new file
-    under a frozen pattern), and every source file the receipt would pin."""
+BUDGET_PROBLEM = ("reading the project's files took longer than the time budget. A person can list the files "
+                  "that matter under sources = [...] in necro.toml and freeze again")
+POST_RUN_GRACE_S = 3.0
+
+
+def snapshot(root: Path, lk: dict, files: list, deadline=None) -> tuple:
+    """Hashes of every file a verdict depends on: the frozen files (and any file now under a frozen
+    pattern) and every source file. Returns (path -> sha256, source paths)."""
     frozen = set(frozen_paths(lk))
     for c in lk.get("contracts", []):
-        try:
-            frozen.update(expand(root, c.get("patterns") or [], strict=False))
-        except SpecError:
-            frozen.add(f"!unexpandable:{c.get('id')}")
-    sources = source_files(root, lk)
-    return sha256_text(canonical_json({
-        "lock": lock_hash(lk),
-        "frozen": {p: hash_file(root / p) for p in sorted(frozen)},
-        "sources": {p: hash_file(root / p) for p in sources},
-    }))
+        frozen.update(expand(root, c.get("patterns") or [], strict=False, files=files))
+    sources = source_files(root, lk, files=files)
+    snap = {}
+    for rel in sorted(frozen | set(sources)):
+        snap[rel] = hash_file(root / rel, deadline)
+        check_deadline(deadline)
+    return snap, sources
 
 
-def evaluate(root, *, budget_s: float | None = None, approved=None, cache: dict | None = None,
-             trigger: str | None = None) -> Verdict:
+def _digest(lh: str, snap: dict, ignore=()) -> str:
+    return sha256_text(canonical_json({"lock": lh, "files": {p: h for p, h in snap.items() if p not in ignore}}))
+
+
+def _approved(approved, root: Path, lh: str) -> bool:
+    if approved is None:
+        return True
+    if isinstance(approved, dict):
+        return approved.get(str(root)) == lh
+    return lh in approved
+
+
+def fingerprint(root, deadline=None, ignore=()) -> str | None:
+    """The same digest a verdict records, without running anything: None when there is no usable
+    lock. Raises BudgetExceeded when reading the files outruns the deadline."""
+    root = Path(root).resolve()
+    try:
+        lk = read_lock(root)
+    except LockError:
+        return None
+    if lk is None:
+        return None
+    files = walk_files(root, deadline)
+    snap, _ = snapshot(root, lk, files, deadline)
+    return _digest(lock_hash(lk), snap, ignore)
+
+
+def evaluate(root, *, budget_s: float | None = None, deadline: float | None = None, approved=None,
+             cache: dict | None = None, trigger: str | None = None) -> Verdict:
     """Run (or reuse) the frozen contracts of the project at ``root`` and write a receipt if all pass.
 
-    ``approved`` is the set of lock hashes a person accepted; None skips that check.
-    ``cache`` maps a project to its last complete run, reused while nothing it depends on changed."""
+    ``deadline`` (a time.monotonic() value) or ``budget_s`` bounds everything: reading files and
+    running contracts. ``approved`` maps a project folder to the one lock hash a person accepted
+    there (None skips the check). ``cache`` keeps the last complete run per project and reuses it
+    only while every file it depends on is byte-for-byte the same."""
     root = Path(root).resolve()
+    if deadline is None and budget_s:
+        deadline = time.monotonic() + budget_s
     if not (root / LOCK_REL).is_file():
         raise FileNotFoundError(f"no {LOCK_REL} in {root}")
     try:
@@ -85,28 +119,45 @@ def evaluate(root, *, budget_s: float | None = None, approved=None, cache: dict 
     except LockError as exc:
         return Verdict(False, root, problems=[f"the lock cannot be used: {exc}"])
     lh = lock_hash(lk)
-    if approved is not None and lh not in approved:
+    if not _approved(approved, root, lh):
         return Verdict(False, root, lh, problems=[
-            f"the lock {LOCK_REL} ({lh[:12]}) is not approved on this machine. A person freezes contracts with "
+            f"the lock {LOCK_REL} ({lh[:12]}) is not approved for this folder. A person freezes contracts with "
             "/necro freeze, or accepts a committed lock after reading it with /necro approve"
         ])
-    problems = list(drift(root, lk).spec)
     try:
-        digest = state_digest(root, lk)
-    except SourcesError as exc:
+        files = walk_files(root, deadline)
+        d = drift(root, lk, files=files, deadline=deadline)
+        problems = list(d.spec)
+        if not d.any() and lock_hash(build_lock(root, files=files)) != lh:
+            problems.append(f"{LOCK_REL} does not match necro.toml and the frozen files, so it was not written by "
+                            "freezing them. A person checks `git diff .necro/` and freezes again")
+        before, _ = snapshot(root, lk, files, deadline)
+        key = str(root)
+        hit = cache.get(key) if cache is not None else None
+        if hit and hit["lock"] == lh and _digest(lh, before, hit["outputs"]) == hit["digest"]:
+            results, outputs, after, cached = hit["results"], hit["outputs"], before, True
+            sources = [p for p in source_files(root, lk, files=files)]
+        else:
+            cached = False
+            results = run_contracts(root, lk, deadline=deadline, drift_result=d)
+            grace = None if deadline is None else max(deadline, time.monotonic()) + POST_RUN_GRACE_S
+            after_files = walk_files(root, grace)
+            after, sources = snapshot(root, lk, after_files, grace)
+            frozen = set(frozen_paths(lk))
+            outputs = sorted(p for p in set(before) | set(after)
+                             if before.get(p) != after.get(p) and p not in frozen)
+            if cache is not None and not any(r.status in ("skipped", "unfinished") for r in results):
+                cache[key] = {"lock": lh, "digest": _digest(lh, after, outputs), "results": results,
+                              "outputs": outputs}
+    except BudgetExceeded:
+        return Verdict(False, root, lh, problems=[BUDGET_PROBLEM])
+    except (SourcesError, SpecError) as exc:
         return Verdict(False, root, lh, problems=[str(exc)])
-    key = str(root)
-    hit = cache.get(key) if cache is not None else None
-    if hit and hit["digest"] == digest:
-        results, cached = hit["results"], True
-    else:
-        results, cached = run_contracts(root, lk, budget_s=budget_s), False
-        if cache is not None and not any(r.status in ("skipped", "unfinished") for r in results):
-            cache[key] = {"digest": digest, "results": results}
     ok = not problems and all_pass(results)
-    v = Verdict(ok, root, lh, results, problems, cached=cached, digest=digest)
+    v = Verdict(ok, root, lh, results, problems, cached=cached, digest=_digest(lh, after, outputs))
     if ok:
-        receipt = build_receipt(root, lk, results, trigger=trigger)
+        pins = [{"path": p, "sha256": after.get(p)} for p in sources if p not in outputs]
+        receipt = build_receipt(root, lk, results, trigger=trigger, pins=pins, outputs=outputs)
         v.receipt_path = write_receipt(root, receipt)
         v.receipt_hash = receipt["receiptHash"]
     return v
@@ -128,7 +179,7 @@ def _describe(r) -> str:
     if r.status == "timeout":
         return f"- {r.id} TIMED OUT{says}: {'; '.join(r.reasons)}."
     if r.status in ("unfinished", "skipped"):
-        return f"- {r.id} NOT CHECKED{says}: the gate's time budget ran out. Run necro_check, which has more time."
+        return f"- {r.id} NOT CHECKED{says}: the gate's time budget ran out. Run the necro_check tool, which has more time."
     tail = _last_lines(r.output_tail, 4)
     return f"- {r.id} COULD NOT RUN{says}." + (f"\n{tail}" if tail else "")
 
@@ -151,8 +202,8 @@ def continue_message(v: Verdict) -> str:
         lines.append(_describe(r))
     lines.append(
         "A person froze these contracts and they are locked by hash, so fix the code under test, not the contracts: "
-        "edits to frozen files are blocked, and any change to them counts as a failure. Run necro_check to re-run "
-        "them. When every contract passes, finish again."
+        "edits to frozen files are blocked, and any change to them counts as a failure. The necro_check tool re-runs "
+        "them (find it with tool_search if it is not in your list). When every contract passes, finish again."
     )
     return "\n".join(lines)
 
@@ -178,17 +229,23 @@ def stamp(v: Verdict, text: str) -> str:
 
 _DONE = re.compile(
     r"\b(?:done|fixed|resolved|implemented|completed?|finished|"
-    r"all (?:the )?tests (?:now )?pass(?:es|ing)?|"
-    r"everything (?:is )?(?:now )?(?:works|working|passes|passing)|"
-    r"ready for review|works now|should (?:now )?work)\b",
+    r"(?:all\s+(?:the\s+|\d+\s+)?)?tests?\s+(?:now\s+)?pass(?:es|ed|ing)?|"
+    r"tests?\s+(?:are|is)\s+(?:now\s+)?(?:green|passing)|"
+    r"everything\s+(?:is\s+)?(?:now\s+)?(?:works|working|passes|passing)|"
+    r"ready\s+(?:for\s+review|to\s+(?:merge|ship))|lgtm|good\s+to\s+go|ship\s+it|works\s+now|all\s+set|"
+    r"shipped|should\s+(?:now\s+)?(?:work|fix\s+it)|this\s+fixes)\b",
     re.IGNORECASE,
 )
-_NEGATED = re.compile(r"(?:\bnot(?: yet)?|n't|\bnever|\bno longer)\s+(?:\w+\s+){0,2}$", re.IGNORECASE)
+_NEGATED = re.compile(r"(?:\bnot(?: yet)?|n't|\bnever|\bno longer|\bnothing|\bcan't say(?: it's| it is)?)\s+(?:\w+\s+){0,2}$",
+                      re.IGNORECASE)
+_ADDRESSED = re.compile(r"\b(?:when|once|if|until|unless|whether)\b[^.!?;:]{0,40}$", re.IGNORECASE)
 
 
 def looks_like_done(text: str) -> bool:
-    """True when a reply claims the work is finished (and does not deny it)."""
+    """True when a reply claims the work is finished (and does not deny it, or talk about the
+    person being done)."""
     for m in _DONE.finditer(text or ""):
-        if not _NEGATED.search(text[max(0, m.start() - 40): m.start()]):
+        before = text[max(0, m.start() - 40): m.start()]
+        if not _NEGATED.search(before) and not _ADDRESSED.search(before):
             return True
     return False

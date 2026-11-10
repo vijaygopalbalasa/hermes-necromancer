@@ -17,7 +17,7 @@ def main(argv=None) -> int:
         i = argv.index("--dir")
         cwd = Path(argv[i + 1])
         del argv[i:i + 2]
-    text, code = dispatch(" ".join(argv), cwd, Approvals(None))
+    text, code = dispatch(" ".join(argv), cwd, Approvals(None), from_shell=True)
     print(text)
     return code
 

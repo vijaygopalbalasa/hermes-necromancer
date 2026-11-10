@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import threading
+import time
 from pathlib import Path
 
 from .necro import commands, gate, guard, lock
@@ -49,11 +50,19 @@ class NecroPlugin:
     def __init__(self, ctx):
         self.ctx = ctx
         self.cache: dict = {}
-        self.turns: dict = {}
+        self.turns: dict = {}   # session id -> project folders the gate checked this turn
+        self.seen: dict = {}    # project folder -> (digest, outputs) at its last check
         self._mutex = threading.Lock()
         self._run_locks: dict = {}
-        state = getattr(ctx, "state", None)
+        try:
+            state = ctx.state
+        except Exception:  # an older Hermes without plugin state: no approval records, no approval check
+            state = None
         self.approvals = commands.Approvals(state)
+        try:
+            self.store_dir = str(Path(state.path).parent) if state is not None else None
+        except Exception:
+            self.store_dir = None
 
     # ---- settings and context -------------------------------------------------------------
     def setting(self, key, default):
@@ -82,81 +91,151 @@ class NecroPlugin:
         with self._mutex:
             return self._run_locks.setdefault(str(root), threading.Lock())
 
-    def evaluate(self, root: Path, budget_s: float, trigger: str) -> gate.Verdict:
+    def evaluate(self, root: Path, deadline: float, trigger: str) -> gate.Verdict:
         run_lock = self._root_lock(root)
-        if not run_lock.acquire(timeout=budget_s):
+        if not run_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
             return gate.Verdict(False, root, problems=["another contract run is still going in this project"])
         try:
-            return gate.evaluate(root, budget_s=budget_s, approved=self.approvals.hashes(), cache=self.cache,
-                                 trigger=trigger)
+            v = gate.evaluate(root, deadline=deadline, approved=self.approvals.mapping(), cache=self.cache,
+                              trigger=trigger)
         finally:
             run_lock.release()
+        hit = self.cache.get(str(root))
+        if v.digest:
+            self.seen[str(root)] = (v.digest, tuple(hit["outputs"]) if hit else ())
+        return v
 
-    def _root_from_paths(self, paths) -> Path | None:
-        base = self.cwd()
-        for raw in paths or []:
-            p = Path(str(raw)).expanduser()
-            if not p.is_absolute():
-                p = Path(base) / p
-            root = lock.find_root(p)
-            if root is not None:
-                return root
-        return None
+    def _deadline(self, key: str, default: float) -> float:
+        return time.monotonic() + self.setting(key, default)
+
+    def _absolute(self, raw) -> Path:
+        p = Path(str(raw)).expanduser()
+        return p if p.is_absolute() else Path(self.cwd()) / p
+
+    def _roots(self, paths=(), include_cwd: bool = True) -> list:
+        """Frozen project folders that hold any of these paths, plus the session folder's."""
+        roots = []
+        for raw in list(paths or []) + ([self.cwd()] if include_cwd else []):
+            root = lock.find_root(self._absolute(raw))
+            if root is not None and root not in roots:
+                roots.append(root)
+        return roots
+
+    def _orphans(self, paths=()) -> list:
+        """Folders a person froze (and never unfroze) whose lock is gone, around these paths."""
+        approved = self.approvals.mapping() or {}
+        out = []
+        for raw in list(paths or []) + [self.cwd()]:
+            try:
+                p = str(self._absolute(raw).resolve())
+            except OSError:
+                continue
+            for root in approved:
+                if (p == root or p.startswith(root.rstrip("/") + "/")) and not (Path(root) / lock.LOCK_REL).is_file():
+                    if root not in out:
+                        out.append(root)
+        return out
+
+    @staticmethod
+    def _orphan_problem(roots) -> str:
+        return (f"the lock of the frozen project in {', '.join(roots)} was deleted. Only a person unfreezes a project, "
+                "with /necro unfreeze; put .necro/lock.json back (for example from git)")
 
     # ---- hooks ---------------------------------------------------------------------------
+    def on_pre_llm_call(self, session_id="", **kwargs):
+        """A new turn starts: forget which projects the previous turn's gate checked."""
+        if session_id:
+            self.turns.pop(session_id, None)
+        return None
+
     def on_pre_verify(self, session_id="", changed_paths=None, attempt=0, **kwargs):
         """Hermes is about to accept a final answer after code edits. Keep it going while any
         frozen contract fails (Hermes bounds this with agent.max_verify_nudges)."""
+        deadline = self._deadline("gate_budget_seconds", GATE_BUDGET_S)
         try:
-            root = self._root_from_paths(changed_paths)
-            if root is None:
+            orphans = self._orphans(changed_paths)
+            if orphans:
+                return {"action": "continue", "message": f"[Contract Necromancer] You cannot finish yet: "
+                        f"{self._orphan_problem(orphans)}."}
+            roots = self._roots(changed_paths)
+            if not roots:
                 return None
-            v = self.evaluate(root, self.setting("gate_budget_seconds", GATE_BUDGET_S), "pre_verify")
-            self._remember(session_id, root)
-            if v.ok:
+            self._remember(session_id, roots)
+            for root in roots:
+                v = self.evaluate(root, deadline, "pre_verify")
+                if not v.ok:
+                    logger.info("contract-necromancer: refused done in %s (attempt %s): %s", root, attempt,
+                                v.failing_ids() or v.problems)
+                    return {"action": "continue", "message": gate.continue_message(v)}
                 logger.info("contract-necromancer: %s passes, receipt %s", root, v.receipt_hash)
-                return None
-            logger.info("contract-necromancer: refused done in %s (attempt %s): %s", root, attempt,
-                        v.failing_ids() or v.problems)
-            return {"action": "continue", "message": gate.continue_message(v)}
+            return None
         except Exception as exc:  # a broken gate must not let a frozen project slip through silently
             logger.exception("contract-necromancer: pre_verify failed")
             return {"action": "continue", "message": f"[Contract Necromancer] The frozen contracts could not be "
                     f"checked ({type(exc).__name__}: {exc}). Run necro_check, fix what it reports, then finish."}
 
     def on_transform(self, response_text="", session_id="", **kwargs):
-        """Stamp the final reply: 'Not done.' first when a contract fails, the receipt after a pass."""
+        """Stamp the final reply: 'Not done.' first when a contract fails, the receipt after a pass.
+
+        A frozen project is checked when the gate looked at it this turn, when any of its files
+        changed since the last check (edits made through the shell never reach pre_verify), or when
+        the reply claims the work is done."""
+        deadline = self._deadline("gate_budget_seconds", GATE_BUDGET_S)
+        checked = self.turns.pop(session_id, []) if session_id else []
+        roots = []
         try:
-            entry = self.turns.pop(session_id, None) if session_id else None
-            if entry is not None:
-                root = Path(entry)
-            else:
-                if not self.setting("stamp_done_claims", True) or not gate.looks_like_done(response_text):
-                    return None
-                root = lock.find_root(self.cwd())
-                if root is None:
-                    return None
-            if not (root / lock.LOCK_REL).is_file():
+            orphans = self._orphans()
+            if orphans:
+                return (f"Not done. Contract Necromancer: {self._orphan_problem(orphans)}. "
+                        f"No receipt was written.\n\n{response_text}")
+            roots = [Path(r) for r in checked if (Path(r) / lock.LOCK_REL).is_file()]
+            for root in self._roots(include_cwd=True):
+                if root not in roots:
+                    roots.append(root)
+            claim = self.setting("stamp_done_claims", True) and gate.looks_like_done(response_text)
+            verdicts = []
+            for root in roots:
+                if str(root) not in checked and not claim and not self._changed(root, deadline):
+                    continue
+                verdicts.append(self.evaluate(root, deadline, "final_reply"))
+            if not verdicts:
                 return None
-            v = self.evaluate(root, self.setting("gate_budget_seconds", GATE_BUDGET_S), "final_reply")
-            return gate.stamp(v, response_text)
-        except Exception:
+            failing = [v for v in verdicts if not v.ok]
+            return gate.stamp(failing[0] if failing else verdicts[0], response_text)
+        except Exception as exc:
             logger.exception("contract-necromancer: transform_llm_output failed")
+            if roots or checked:
+                return (f"Not done. Contract Necromancer could not check the frozen contracts "
+                        f"({type(exc).__name__}). No receipt was written.\n\n{response_text}")
             return None
 
-    def on_pre_tool_call(self, tool_name="", args=None, **kwargs):
-        """Block the agent's ordinary routes to rewriting a frozen contract or the lock."""
+    def _changed(self, root: Path, deadline: float) -> bool:
+        """True when the project's files differ from its last check. The first look only records a
+        baseline, so a reply in a project nobody touched stays unstamped."""
+        last = self.seen.get(str(root))
         try:
-            msg = guard.check_tool_call(tool_name, args if isinstance(args, dict) else {}, self.cwd())
+            now = gate.fingerprint(root, deadline, ignore=last[1] if last else ())
+        except Exception:
+            return True
+        if last is None:
+            if now is not None:
+                self.seen[str(root)] = (now, ())
+            return False
+        return now != last[0]
+
+    def on_pre_tool_call(self, tool_name="", args=None, **kwargs):
+        """Block the agent's ordinary routes to rewriting a frozen contract, the lock or the approvals."""
+        try:
+            msg = guard.check_tool_call(tool_name, args if isinstance(args, dict) else {}, self.cwd(), self.store_dir)
         except Exception:
             logger.exception("contract-necromancer: pre_tool_call failed")
             return None
         return {"action": "block", "message": msg} if msg else None
 
-    def _remember(self, session_id, root: Path) -> None:
+    def _remember(self, session_id, roots) -> None:
         if not session_id:
             return
-        self.turns[session_id] = str(root)
+        self.turns[session_id] = [str(r) for r in roots]
         while len(self.turns) > MAX_TURNS_TRACKED:
             self.turns.pop(next(iter(self.turns)))
 
@@ -164,6 +243,9 @@ class NecroPlugin:
     def tool_status(self, args=None, **kwargs) -> str:
         root = lock.find_root(self.cwd())
         if root is None:
+            orphans = self._orphans()
+            if orphans:
+                return json.dumps({"frozen": True, "error": self._orphan_problem(orphans)})
             return json.dumps({"frozen": False, "message": "No frozen acceptance contracts in this project "
                                "(no .necro/lock.json). Nothing gates done here."})
         try:
@@ -188,7 +270,7 @@ class NecroPlugin:
         root = lock.find_root(self.cwd())
         if root is None:
             return json.dumps({"frozen": False, "message": "No frozen acceptance contracts in this project."})
-        v = self.evaluate(root, self.setting("check_budget_seconds", CHECK_BUDGET_S), "necro_check")
+        v = self.evaluate(root, self._deadline("check_budget_seconds", CHECK_BUDGET_S), "necro_check")
         return json.dumps(v.to_dict())
 
     # ---- person-facing commands -------------------------------------------------------------
@@ -205,7 +287,7 @@ class NecroPlugin:
     def cli_run(self, args) -> int:
         cwd = args.dir or os.getcwd()
         raw = args.action + (f" {args.receipt}" if getattr(args, "receipt", None) else "")
-        text, code = commands.dispatch(raw, cwd, self.approvals, self.cache)
+        text, code = commands.dispatch(raw, cwd, self.approvals, self.cache, from_shell=True)
         print(text)
         return code
 
@@ -219,6 +301,7 @@ def register(ctx):
     ctx.register_hook("pre_verify", plugin.on_pre_verify)
     ctx.register_hook("transform_llm_output", plugin.on_transform, hold_stream=plugin.setting("hold_stream", False))
     ctx.register_hook("pre_tool_call", plugin.on_pre_tool_call)
+    ctx.register_hook("pre_llm_call", plugin.on_pre_llm_call)
     ctx.register_command("necro", plugin.slash, description="Frozen acceptance contracts: status, freeze, check, verify",
                          args_hint="[status|freeze|approve|unfreeze|check|verify|receipts|demo]")
     ctx.register_cli_command(name="necro", help="Frozen acceptance contracts and receipts (Contract Necromancer)",

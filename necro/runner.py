@@ -74,13 +74,18 @@ def _kill(proc: subprocess.Popen) -> None:
 
 
 def run_command(root: Path, run: str, env: dict, timeout: float):
-    """Run one command. Returns (status, exit_code, duration_ms, output_tail)."""
+    """Run one command. Returns (status, exit_code, duration_ms, output_tail).
+
+    Python gets an empty bytecode cache of its own (PYTHONPYCACHEPREFIX), so a stale or planted
+    .pyc in the project is never imported in place of its source, and no __pycache__ lands in the
+    project. Anything the command leaves running in its process group is killed afterwards."""
     try:
         argv = shlex.split(run)
     except ValueError as exc:
         return "error", None, 0, f"could not parse the command: {exc}"
     started = time.monotonic()
-    with tempfile.TemporaryFile() as out:
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryDirectory(prefix="necro-pycache-") as pycache:
+        env = {**env, "PYTHONPYCACHEPREFIX": pycache}
         kwargs = {}
         if os.name == "posix":
             kwargs["start_new_session"] = True
@@ -101,21 +106,22 @@ def run_command(root: Path, run: str, env: dict, timeout: float):
                 pass
             return "timeout", None, int((time.monotonic() - started) * 1000), _tail(out)
         finally:
-            if proc.poll() is None:
-                _kill(proc)
+            _kill(proc)  # the leader has exited; this ends anything it left behind in its group
         elapsed = int((time.monotonic() - started) * 1000)
         return ("pass" if code == 0 else "fail"), code, elapsed, _tail(out)
 
 
 def run_contracts(root, lk: dict, *, budget_s: float | None = None, default_timeout: float = DEFAULT_TIMEOUT,
-                  only=None) -> list:
+                  only=None, deadline: float | None = None, drift_result=None) -> list:
     """Run every frozen contract. A contract whose files drifted is reported as tampered and not run.
 
-    ``budget_s`` bounds the whole run: a contract cut short by it is ``unfinished`` and any contract
-    that never started is ``skipped``. Neither counts as a pass."""
+    ``budget_s`` (or an absolute monotonic ``deadline``) bounds the whole run: a contract cut short
+    by it is ``unfinished`` and any contract that never started is ``skipped``. Neither counts as a
+    pass."""
     root = Path(root).resolve()
-    d = drift(root, lk)
-    deadline = time.monotonic() + budget_s if budget_s else None
+    if deadline is None and budget_s:
+        deadline = time.monotonic() + budget_s
+    d = drift_result if drift_result is not None else drift(root, lk, deadline=deadline)
     results = []
     for c in lk["contracts"]:
         if only and c["id"] not in only:

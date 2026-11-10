@@ -72,7 +72,7 @@ class Registration(unittest.TestCase):
             ctx = plugin_for(p)
             manifest = (REPO / "plugin.yaml").read_text()
             self.assertEqual(set(ctx.tools), {"necro_status", "necro_check"})
-            self.assertEqual(set(ctx.hooks), {"pre_verify", "transform_llm_output", "pre_tool_call"})
+            self.assertEqual(set(ctx.hooks), {"pre_verify", "transform_llm_output", "pre_tool_call", "pre_llm_call"})
             for name in list(ctx.tools) + list(ctx.hooks):
                 self.assertIn(f"- {name}", manifest)
             self.assertEqual(set(ctx.commands), {"necro"})
@@ -98,7 +98,7 @@ class SlashCommand(unittest.TestCase):
             out = ctx.commands["necro"]("freeze")
             self.assertIn("Froze 3 contracts", out)
             lk = lock.read_lock(p.dir)
-            self.assertIn(lock.lock_hash(lk), ctx.state.get("approved_locks"))
+            self.assertEqual(ctx.state.get("approved_roots")[str(p.dir)]["lock"], lock.lock_hash(lk))
 
     def test_status_before_and_after_freeze(self):
         with Project() as p:

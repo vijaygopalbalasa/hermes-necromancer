@@ -34,3 +34,4 @@ provides_hooks:
   - pre_verify
   - transform_llm_output
   - pre_tool_call
+  - pre_llm_call

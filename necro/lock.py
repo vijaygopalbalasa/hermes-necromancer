@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .canon import canonical_json, hash_file, sha256_text, utc_now, write_json_atomic
-from .spec import SPEC_NAME, SpecError, expand, load_spec
+from .spec import SPEC_NAME, SpecError, expand, load_spec, walk_files
 
 LOCK_REL = ".necro/lock.json"
 LOCK_KIND = "hermes-necromancer/lock"
@@ -21,15 +21,15 @@ def lock_path(root) -> Path:
     return Path(root) / LOCK_REL
 
 
-def freeze(root, now: str | None = None) -> dict:
-    """Read necro.toml, hash every contract file and the spec itself, and write the lock.
-
-    This is a person's act: they have read the contracts and agree they define done."""
+def build_lock(root, now: str | None = None, files=None) -> dict:
+    """The lock that freezing the project now would write, without writing it."""
     root = Path(root).resolve()
     sp = load_spec(root)
+    if files is None:
+        files = walk_files(root)
     contracts = []
     for c in sp.contracts:
-        files = expand(root, c.files, strict=True, where=f"contract {c.id}")
+        frozen = expand(root, c.files, strict=True, where=f"contract {c.id}", files=files)
         contracts.append({
             "id": c.id,
             "says": c.says,
@@ -37,9 +37,9 @@ def freeze(root, now: str | None = None) -> dict:
             "timeout": c.timeout,
             "env": list(c.env),
             "patterns": list(c.files),
-            "files": [{"path": f, "sha256": hash_file(root / f)} for f in files],
+            "files": [{"path": f, "sha256": hash_file(root / f)} for f in frozen],
         })
-    lk = {
+    return {
         "kind": LOCK_KIND,
         "version": 1,
         "spec": {"path": SPEC_NAME, "sha256": hash_file(root / SPEC_NAME)},
@@ -47,6 +47,14 @@ def freeze(root, now: str | None = None) -> dict:
         "sources": sp.sources,
         "frozenAt": now or utc_now(),
     }
+
+
+def freeze(root, now: str | None = None) -> dict:
+    """Read necro.toml, hash every contract file and the spec itself, and write the lock.
+
+    This is a person's act: they have read the contracts and agree they define done."""
+    root = Path(root).resolve()
+    lk = build_lock(root, now)
     write_json_atomic(lock_path(root), lk)
     return json.loads(json.dumps(lk))
 
@@ -56,10 +64,11 @@ def read_lock(root) -> dict | None:
     path = lock_path(root)
     try:
         lk = json.loads(path.read_text(encoding="utf-8"))
+        canonical_json(lk)  # numbers too large to print, and the like, fail here rather than later
     except FileNotFoundError:
         return None
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise LockError(f"{LOCK_REL} cannot be read: {exc}") from None
+    except (OSError, ValueError, RecursionError) as exc:
+        raise LockError(f"{LOCK_REL} cannot be read: {str(exc)[:200]}") from None
     if not isinstance(lk, dict) or lk.get("kind") != LOCK_KIND:
         raise LockError(f"{LOCK_REL} is not a Contract Necromancer lock")
     contracts = lk.get("contracts")
@@ -72,6 +81,11 @@ def read_lock(root) -> dict | None:
         for f in c["files"]:
             if not (isinstance(f, dict) and isinstance(f.get("path"), str) and isinstance(f.get("sha256"), str)):
                 raise LockError(f"{LOCK_REL} has a malformed file entry in contract {c['id']}")
+        timeout = c.get("timeout")
+        if timeout is not None and (not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 3600):
+            raise LockError(f"{LOCK_REL} has a bad timeout in contract {c['id']}")
+        if not isinstance(c.get("env", []), list) or not isinstance(c.get("patterns", []), list):
+            raise LockError(f"{LOCK_REL} has a malformed contract {c['id']}")
     if not isinstance(lk.get("spec"), dict):
         raise LockError(f"{LOCK_REL} does not pin {SPEC_NAME}")
     return lk
@@ -131,13 +145,14 @@ class Drift:
         return sorted(set(out))
 
 
-def drift(root, lk: dict) -> Drift:
-    """What changed on disk since the freeze: the spec, and per contract its pinned files."""
+def drift(root, lk: dict, files=None, deadline=None) -> Drift:
+    """What changed on disk since the freeze: the spec, and per contract its pinned files and any
+    new file that matches one of its patterns."""
     root = Path(root).resolve()
     d = Drift()
     spec_entry = lk.get("spec") or {}
     spec_rel = spec_entry.get("path") or SPEC_NAME
-    current = hash_file(root / spec_rel)
+    current = hash_file(root / spec_rel, deadline)
     if current is None:
         d.spec.append(f"missing: {spec_rel}")
     elif current != spec_entry.get("sha256"):
@@ -146,13 +161,16 @@ def drift(root, lk: dict) -> Drift:
         reasons = []
         pinned = {f["path"]: f["sha256"] for f in c.get("files", [])}
         for rel, digest in pinned.items():
-            now = hash_file(root / rel)
+            now = hash_file(root / rel, deadline)
             if now is None:
                 reasons.append(f"missing: {rel}")
             elif now != digest:
                 reasons.append(f"changed since freeze: {rel}")
+        patterns = c.get("patterns") or list(pinned)
+        if any(set("*?[") & set(pat) for pat in patterns) and files is None:
+            files = walk_files(root, deadline)
         try:
-            matched = expand(root, c.get("patterns") or list(pinned), strict=False, where=f"contract {c['id']}")
+            matched = expand(root, patterns, strict=False, where=f"contract {c['id']}", files=files)
         except SpecError as exc:
             reasons.append(f"cannot expand its files: {exc}")
             matched = []

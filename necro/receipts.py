@@ -10,17 +10,11 @@ from pathlib import Path
 from .canon import canonical_json, hash_file, sha256_text, utc_now, write_json_atomic
 from .lock import frozen_paths, lock_hash
 from .runner import all_pass
-from .spec import expand
+from .spec import expand, skipped, walk_files
 
 RECEIPTS_REL = ".necro/receipts"
 RECEIPT_KIND = "hermes-necromancer/receipt"
 UNHASHED = ("receiptHash", "createdAt", "trigger")
-SKIP_DIRS = {
-    ".git", ".necro", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv", ".pytest_cache",
-    ".mypy_cache", ".ruff_cache", ".tox", ".nox", ".idea", ".vscode", ".gradle", ".next", ".turbo",
-}
-SKIP_SUFFIXES = (".pyc", ".pyo")
-SKIP_NAMES = {".DS_Store"}
 MAX_SOURCES = 20000
 
 
@@ -46,59 +40,40 @@ def git_head(root: Path) -> str | None:
     return out.strip() or None
 
 
-def _listing(root: Path) -> list:
-    inside = _git(root, "rev-parse", "--is-inside-work-tree")
-    if inside and inside.strip() == "true":
-        # Paths come back relative to root, which is git's working directory here.
-        out = _git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard")
-        if out is not None:
-            return [name for name in out.split("\0") if name and (root / name).is_file()]
-    files = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
-        for name in filenames:
-            rel = (Path(dirpath) / name).relative_to(root).as_posix()
-            files.append(rel)
-            if len(files) > MAX_SOURCES * 2:
-                break
-    return files
-
-
-def source_files(root, lk: dict) -> list:
-    """Project files a receipt pins: the declared ``sources`` globs, else every file in the project
-    (git's view when it is a repository: tracked plus untracked, minus ignored), minus caches, the
-    .necro folder and the frozen contract files, which are pinned on their own."""
+def source_files(root, lk: dict, files=None, deadline=None) -> list:
+    """Project files a receipt pins: the declared ``sources`` globs, else every regular file in the
+    project, whatever .gitignore says (a file git ignores can still change what a test does), minus
+    caches, installed dependencies, the .necro folder and the frozen contract files, which are
+    pinned on their own."""
     root = Path(root).resolve()
     frozen = frozen_paths(lk)
+    if files is None:
+        files = walk_files(root, deadline)
     if lk.get("sources"):
-        files = expand(root, lk["sources"], strict=False, where="sources")
-    else:
-        files = _listing(root)
-    out = set()
-    for rel in files:
-        parts = rel.split("/")
-        if SKIP_DIRS & set(parts[:-1]) or parts[-1] in SKIP_NAMES or rel.endswith(SKIP_SUFFIXES):
-            continue
-        if rel in frozen:
-            continue
-        out.add(rel)
+        files = expand(root, lk["sources"], strict=False, where="sources", files=files)
+    out = sorted(rel for rel in files if rel not in frozen and not skipped(rel))
     if len(out) > MAX_SOURCES:
         raise SourcesError(
-            f"{len(out)} files would be pinned; add sources = [\"src/**/*.py\", ...] to necro.toml to name the ones that matter"
+            f"{len(out)} files would be pinned; a person should add sources = [\"src/**/*.py\", ...] to "
+            "necro.toml to name the ones that matter"
         )
-    return sorted(out)
+    return out
 
 
-def pin(root: Path, rels) -> list:
-    return [{"path": rel, "sha256": hash_file(root / rel)} for rel in rels]
+def pin(root: Path, rels, deadline=None) -> list:
+    return [{"path": rel, "sha256": hash_file(root / rel, deadline)} for rel in rels]
 
 
 def receipt_hash(receipt: dict) -> str:
     return sha256_text(canonical_json({k: v for k, v in receipt.items() if k not in UNHASHED}))
 
 
-def build_receipt(root, lk: dict, results, trigger: str | None = None, now: str | None = None) -> dict:
-    """A receipt for a run in which every frozen contract passed. Refuses anything less."""
+def build_receipt(root, lk: dict, results, trigger: str | None = None, now: str | None = None,
+                  pins=None, outputs=()) -> dict:
+    """A receipt for a run in which every frozen contract passed. Refuses anything less.
+
+    ``pins`` are the source hashes to record (taken by the caller around the run); ``outputs`` are
+    files the contracts themselves wrote during the run, listed but not pinned."""
     root = Path(root).resolve()
     results = list(results)
     by_id = {r.id: r for r in results}
@@ -120,9 +95,11 @@ def build_receipt(root, lk: dict, results, trigger: str | None = None, now: str 
             }
             for c in lk["contracts"]
         ],
-        "sources": pin(root, source_files(root, lk)),
+        "sources": list(pins) if pins is not None else pin(root, source_files(root, lk)),
         "gitCommit": git_head(root),
     }
+    if outputs:
+        receipt["outputs"] = sorted(outputs)
     receipt["receiptHash"] = receipt_hash(receipt)
     receipt["createdAt"] = now or utc_now()
     receipt["trigger"] = trigger
