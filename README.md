@@ -3,7 +3,7 @@
 You freeze the tests that define done; when Hermes tries to finish, the plugin runs them itself, sends Hermes back to
 work while one fails, and ends a passing reply with a receipt anyone can re-check.
 
-![A Hermes reply stamped "Not done" because a frozen test still fails](docs/img/not-done.png)
+![In a real run Hermes said "The fix is complete" while frozen test C4 still failed; the plugin refused that done](docs/img/not-done.png)
 
 ```
 hermes plugins install vijaygopalbalasa/hermes-necromancer --enable
@@ -18,7 +18,7 @@ hermes necro demo
 | Check runners | Ask the model to run the checks, so an edited test only makes an old pass stale. | A person freezes the tests by hash and Hermes is blocked from editing them; any change to one makes it fail. |
 | Push gates | Hold back `git push` or a pull request until a check passes. | Gates "done" itself, before the reply reaches you, and leaves a receipt that re-verifies in a fresh clone. |
 
-<!-- HERMES-RESULT: one line with the with/without numbers from real Hermes runs goes here once measured. -->
+A real run in Hermes 0.23.1 with a local model and no API key: asked only to fix the lost cents, Hermes said "The fix is complete. What's left: None." while a frozen test was still failing. The plugin refused that done and named the test; Hermes fixed it and finished with all four tests passing and a receipt ([the log](docs/real-run-2026-11-11.md), with a fairer comparison).
 
 The same gate in Kiro, not Hermes: on a task that can't honestly be finished, agents claimed done in 11 of 11 runs
 without it and 0 of 19 with it ([github.com/vijaygopalbalasa/contract-necromancer](https://github.com/vijaygopalbalasa/contract-necromancer), experiments/).
