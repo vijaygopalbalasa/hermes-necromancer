@@ -1,6 +1,7 @@
 """Findings from three automated security review rounds (Nov 10), each reproduced before its fix."""
 
 import argparse
+import shlex
 import json
 import os
 import subprocess
@@ -305,3 +306,50 @@ class R3PersonOnlyCommands(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class R4AncestorWalkAndFind(unittest.TestCase):
+    """Round 4: a ps failure part way up the parent chain must refuse, and a destructive find run from a
+    subfolder must not reach the lock."""
+
+    def test_a_ps_failure_part_way_up_refuses(self):
+        real_run = subprocess.run
+        calls = {"n": 0}
+
+        def flaky(*a, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return subprocess.CompletedProcess(a[0], 0, stdout="999999 /bin/zsh -l\n", stderr="")
+            return subprocess.CompletedProcess(a[0], 1, stdout="", stderr="no such process")
+
+        commands.subprocess.run = flaky
+        try:
+            self.assertIsNone(commands.hermes_ancestors())
+        finally:
+            commands.subprocess.run = real_run
+
+    def test_find_delete_from_a_subfolder_cannot_reach_the_lock(self):
+        with Project(code=FIXED) as p:
+            ctx, _ = ctx_for(p)
+            ctx.commands["necro"]("freeze")
+            sub = p.dir / "contracts"
+            msg = guard.check_tool_call("terminal", {"command": "find .. -name lock.json -delete",
+                                                     "workdir": str(sub)}, str(sub))
+            self.assertIsNotNone(msg)
+            self.assertTrue((p.dir / ".necro" / "lock.json").is_file())
+
+
+class R4RefusalsSayWhatToDoInstead(unittest.TestCase):
+    def test_the_agent_marker_refusal_names_the_real_plugin_path(self):
+        why = commands.person_problem("freeze", environ={"AI_AGENT": "1"}, stdin_isatty=True, ancestors=[])
+        self.assertIn("/necro freeze", why)
+        self.assertIn("python3 " + shlex.quote(str(REPO / "necro")) + " freeze", why)
+        self.assertNotIn("<plugin folder>", why)
+
+    def test_nothing_suggests_a_shell_freeze_that_always_refuses(self):
+        with Project(code=FIXED) as p:
+            (p.dir / ".necro").mkdir(exist_ok=True)
+            out, _ = commands.dispatch("status", p.dir, commands.Approvals(Path(tempfile.mkdtemp())))
+            self.assertNotIn("hermes necro freeze", out)
+        src = (REPO / "necro" / "commands.py").read_text()
+        self.assertNotIn("or `hermes necro freeze`", src)

@@ -155,7 +155,7 @@ def status(cwd, approvals: Approvals) -> tuple:
                 sp = load_spec(draft)
                 listed = "\n".join(f"  {c.id:<6} {c.says or '(no description)'}" for c in sp.contracts)
                 return (f"Contracts in {draft / SPEC_NAME} are not frozen yet:\n{listed}\n"
-                        "Read them, then run /necro freeze (or `hermes necro freeze`)."), 0
+                        "Read them, then type /necro freeze in Hermes."), 0
             except SpecError as exc:
                 return f"{draft / SPEC_NAME} is not ready to freeze: {exc}", 1
         return (f"Nothing is frozen at {Path(cwd).resolve()} (no {LOCK_REL} here or above). Write {SPEC_NAME} with "
@@ -300,7 +300,7 @@ def hermes_ancestors(limit: int = 40):
             return None
         parts = out.stdout.strip().split(None, 1)
         if out.returncode != 0 or not parts:
-            return chain or None
+            return None
         try:
             pid = int(parts[0])
         except ValueError:
@@ -322,7 +322,7 @@ def person_problem(verb: str, *, session_env_ok: bool = True, environ=None, stdi
     marker = next((name for name in ("AI_AGENT", "HERMES_AGENT") if env.get(name)), None)
     if marker:
         return (f"{marker} is set, so this may be an AI agent's shell (Hermes sets it in every hermes command). "
-                f"{use_slash} Or run python3 <plugin folder>/necro {verb} in your own terminal.")
+                f"{use_slash} Or run python3 {shlex.quote(str(Path(__file__).resolve().parent))} {verb} in your own terminal.")
     if not (sys.stdin.isatty() if stdin_isatty is None else stdin_isatty):
         return f"stdin is not a terminal, so no person is typing this. {use_slash}"
     chain = hermes_ancestors() if ancestors is _AUTO else ancestors
