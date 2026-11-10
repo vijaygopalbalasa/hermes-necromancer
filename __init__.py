@@ -302,6 +302,10 @@ def register(ctx):
     ctx.register_hook("transform_llm_output", plugin.on_transform, hold_stream=plugin.setting("hold_stream", False))
     ctx.register_hook("pre_tool_call", plugin.on_pre_tool_call)
     ctx.register_hook("pre_llm_call", plugin.on_pre_llm_call)
+    try:  # mark the agent's own commands, so person-only `necro freeze/approve/unfreeze` refuse to run there
+        ctx.register_session_env([commands.AGENT_MARKER], lambda session_id: {commands.AGENT_MARKER: session_id or "1"})
+    except Exception:
+        logger.debug("contract-necromancer: register_session_env unavailable", exc_info=True)
     ctx.register_command("necro", plugin.slash, description="Frozen acceptance contracts: status, freeze, check, verify",
                          args_hint="[status|freeze|approve|unfreeze|check|verify|receipts|demo]")
     ctx.register_cli_command(name="necro", help="Frozen acceptance contracts and receipts (Contract Necromancer)",

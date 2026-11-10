@@ -200,9 +200,9 @@ def _code_writes(low_text: str, spellings: set) -> bool:
 def _shell_block(cmd: str, wd: str, store_dir: str | None) -> str | None:
     cmd = cmd[:MAX_TEXT]
     words = _words(cmd)
-    if _person_only(words):
-        return PERSON_BLOCK
     low = cmd.lower()
+    if _person_only(words) or "necro_agent_session" in low or "necro_agent_session" in " ".join(words).lower():
+        return PERSON_BLOCK
     if store_dir and os.path.realpath(store_dir).lower() in low:
         for segment in SEGMENT_SPLIT.split(cmd):
             name, _ = _command_name(_words(segment))

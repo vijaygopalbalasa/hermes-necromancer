@@ -302,24 +302,38 @@ class SecondRound(unittest.TestCase):
     def test_person_only_commands_refuse_to_run_in_an_agent_shell(self):
         from necro import commands
         with Project(code=FIXED) as p:
-            os.environ["HERMES_AGENT"] = "true"
+            os.environ["NECRO_AGENT_SESSION"] = "s1"
             try:
                 text, code = commands.dispatch("freeze", p.dir, commands.Approvals(None), from_shell=True)
             finally:
-                del os.environ["HERMES_AGENT"]
+                del os.environ["NECRO_AGENT_SESSION"]
             self.assertEqual(code, 3)
             self.assertIn("person", text)
             self.assertIsNone(lock.read_lock(p.dir))
 
-    def test_the_slash_command_is_not_refused(self):
+    def test_hermes_own_markers_do_not_refuse_a_person(self):
+        # Hermes sets AI_AGENT and HERMES_AGENT in every hermes process, including a person's `hermes necro freeze`.
         from necro import commands
         with Project(code=FIXED) as p:
-            os.environ["AI_AGENT"] = "something"
+            os.environ["AI_AGENT"], os.environ["HERMES_AGENT"] = "hermes-agent", "true"
             try:
-                text, code = commands.dispatch("freeze", p.dir, commands.Approvals(None))
+                text, code = commands.dispatch("freeze", p.dir, commands.Approvals(None), from_shell=True)
             finally:
-                del os.environ["AI_AGENT"]
+                del os.environ["AI_AGENT"], os.environ["HERMES_AGENT"]
             self.assertEqual(code, 0, text)
+
+    def test_the_marker_is_registered_for_the_agent_shell(self):
+        with Project() as p:
+            ctx = FakeCtx(p.dir)
+            ctx.session_env = {}
+            ctx.register_session_env = lambda names, resolver: ctx.session_env.update({n: resolver for n in names})
+            load_plugin().register(ctx)
+            self.assertEqual(ctx.session_env["NECRO_AGENT_SESSION"]("abc"), {"NECRO_AGENT_SESSION": "abc"})
+
+    def test_the_agent_cannot_unset_the_marker_through_the_guard(self):
+        with Project(code=FIXED) as p:
+            lock.freeze(p.dir)
+            self.assertIsNotNone(guard.check_tool_call("terminal", {"command": "unset NECRO_AGENT_SESSION; true"}, str(p.dir)))
 
     def test_a_forged_lock_that_a_person_did_not_freeze_is_refused_even_if_approved(self):
         with Project(code=BUGGY) as p:

@@ -55,11 +55,10 @@ def main() -> int:
     home, project, log = tmp / "home", tmp / "project", tmp / "requests.jsonl"
     home.mkdir()
     shutil.copytree(REPO / "demo" / "tip_split", project)
-    # No keys reach Hermes, and the agent markers are dropped: this script plays the person for the
-    # freeze step, which necro refuses to run from an AI agent's shell (HERMES_AGENT / AI_AGENT).
-    env = {k: v for k, v in os.environ.items()
-           if not k.endswith(("_API_KEY", "_TOKEN")) and k not in ("AI_AGENT", "HERMES_AGENT")}
-    env.update({"HERMES_HOME": str(home), "NO_COLOR": "1"})
+    # No keys reach Hermes. This script plays the person for the freeze step (its shell is not the agent's).
+    env = {k: v for k, v in os.environ.items() if not k.endswith(("_API_KEY", "_TOKEN"))}
+    env.pop("NECRO_AGENT_SESSION", None)
+    env.update({"HERMES_HOME": str(home), "NO_COLOR": "1", "NECRO_E2E_HERMES": str(Path(args.hermes).resolve())})
     print(f"Hermes: {args.hermes}")
     print(run([args.hermes, "--version"], env).stdout.strip().splitlines()[0])
     print(f"Plugin: {REPO} at {sha}" + (" (uncommitted changes are NOT installed)" if dirty else ""))
@@ -70,7 +69,7 @@ def main() -> int:
     print(run([args.hermes, "necro", "freeze", "--dir", str(project)], env).stdout.strip(), "\n")
 
     model = subprocess.Popen([sys.executable, str(HERE / "scripted_model.py"), "--port", "0", "--log", str(log)],
-                             stdout=subprocess.PIPE, text=True)
+                             stdout=subprocess.PIPE, text=True, env=env)
     try:
         port = int(model.stdout.readline().strip())
         base = f"http://127.0.0.1:{port}/v1"
@@ -87,6 +86,7 @@ def main() -> int:
     seen = [m for r in requests for m in (r.get("messages") or [])]
     nudges = [text_of(m) for m in seen if m.get("role") == "user" and "[Contract Necromancer]" in text_of(m)]
     blocked = [text_of(m) for m in seen if m.get("role") == "tool" and "Blocked by Contract Necromancer" in text_of(m)]
+    refused = [text_of(m) for m in seen if m.get("role") == "tool" and "is a person's command" in text_of(m)]
     receipts = sorted((project / ".necro" / "receipts").glob("*.json"))
     verify = run([args.hermes, "necro", "verify", "--dir", str(project)], env, check=False)
     contract_intact = (project / "contracts" / "test_fair.py").read_bytes() == (REPO / "demo" / "tip_split" / "contracts" / "test_fair.py").read_bytes()
@@ -96,6 +96,7 @@ def main() -> int:
         ("The model's first 'Done!' was refused with a note naming C2", any("C2" in n for n in nudges)),
         ("The write_file to the frozen contract was blocked", bool(blocked)),
         ("The frozen contract file is unchanged", contract_intact),
+        ("The agent's own shell could not approve contracts (necro refused it)", bool(refused)),
         ("A receipt was written after the real fix", bool(receipts)),
         ("The final reply carries the receipt", "frozen acceptance contracts pass" in chat.stdout and "Receipt" in chat.stdout),
         ("hermes necro verify says CONFIRMED", "CONFIRMED" in verify.stdout),

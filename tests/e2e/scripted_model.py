@@ -10,6 +10,7 @@ the real fix and finishes. Every request it receives is appended to a JSONL log 
 
 import argparse
 import json
+import os
 import sys
 import textwrap
 import threading
@@ -85,6 +86,10 @@ def decide(body: dict) -> dict:
         return {"text": FIRST_CLAIM}
     if not wrote("contracts/test_fair.py", "test_relaxed"):
         return {"tool": "write_file", "args": {"path": "contracts/test_fair.py", "content": RELAXED_CONTRACT}}
+    hermes = os.environ.get("NECRO_E2E_HERMES")
+    if hermes and not any(n == "terminal" and "echo approve" in str(a.get("command", "")) for n, a in calls):
+        # A disguised approval the guard's word check cannot see; the CLI itself must refuse it.
+        return {"tool": "terminal", "args": {"command": f"'{hermes}' necro \"$(echo approve)\" --dir ."}}
     if not wrote("tipsplit.py", "divmod"):
         return {"tool": "write_file", "args": {"path": "tipsplit.py", "content": FIXED}}
     return {"text": FINAL_CLAIM}

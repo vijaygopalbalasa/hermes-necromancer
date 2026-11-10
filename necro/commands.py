@@ -222,10 +222,14 @@ def do_receipts(cwd) -> tuple:
 PERSON_ONLY = {"freeze", "unfreeze", "approve"}
 
 
+AGENT_MARKER = "NECRO_AGENT_SESSION"
+
+
 def in_agent_shell() -> bool:
-    """Hermes exports HERMES_AGENT=true and AI_AGENT=hermes-agent into every command its terminal
-    tool runs; other agents set AI_AGENT too."""
-    return bool(os.environ.get("HERMES_AGENT") or os.environ.get("AI_AGENT"))
+    """The plugin gives every command a Hermes agent runs NECRO_AGENT_SESSION (through
+    ctx.register_session_env). A person's own terminal does not have it. (Hermes's own
+    AI_AGENT and HERMES_AGENT cannot tell the two apart: Hermes sets them in every process.)"""
+    return bool(os.environ.get(AGENT_MARKER))
 
 
 def dispatch(raw: str, cwd, approvals: Approvals, cache=None, from_shell: bool = False) -> tuple:
@@ -236,9 +240,8 @@ def dispatch(raw: str, cwd, approvals: Approvals, cache=None, from_shell: bool =
     sub = words[0].lower() if words else "status"
     rest = words[1:]
     if from_shell and sub in PERSON_ONLY and in_agent_shell():
-        return (f"Refused: `necro {sub}` is a person's command and this shell belongs to an AI agent "
-                "(HERMES_AGENT or AI_AGENT is set). Run it in your own terminal, or type /necro "
-                f"{sub} in Hermes."), 3
+        return (f"Refused: `necro {sub}` is a person's command and this shell belongs to a Hermes agent "
+                f"({AGENT_MARKER} is set). Run it in your own terminal, or type /necro {sub} in Hermes."), 3
     if sub in ("status", "show"):
         return status(cwd, approvals)
     if sub == "freeze":
