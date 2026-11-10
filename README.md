@@ -113,7 +113,8 @@ stamped final reply, without streaming) and `stamp_done_claims` (true).
   (`node_modules`, `.venv` and the like) are not pinned, so a change there goes unnoticed.
 - Contracts slower than the gate's budget are reported as not checked; the agent is told to run `necro_check`,
   which has 10 minutes. Raise `gate_budget_seconds` and Hermes's `plugins.hook_callback_timeout` together if
-  your contracts are slow.
+  your contracts are slow. In a very large project, hashing every file can outrun the budget on its own; the gate
+  then refuses until a person lists the files that matter under `sources = [...]` in `necro.toml`.
 - On Hermes 0.22.7 to 0.23.0 the agent-shell marker is not available (it needs `register_session_env`), so
   person-only commands rely on the guard alone.
 - Tested on macOS with Hermes 0.23.1 and 0.22.7, Python 3.11 and 3.14. Linux and Windows are untested here;
@@ -129,7 +130,7 @@ network calls, no telemetry, no credentials, no background processes.
 ## Tests
 
 ```
-python3 -m unittest discover -s tests                      # 141 tests, about 40 s
+python3 -m unittest discover -s tests                      # 143 tests, about 40 s
 python3 tests/e2e/run_in_hermes.py --hermes $(which hermes)  # the real Hermes agent loop
 ```
 

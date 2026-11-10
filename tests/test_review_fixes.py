@@ -355,5 +355,25 @@ class SecondRound(unittest.TestCase):
             self.assertIsNotNone(guard.check_tool_call("terminal", {"command": "rm -r .ne''cro"}, str(p.dir)))
 
 
+class FirstTurnBaseline(unittest.TestCase):
+    def test_a_shell_only_edit_in_the_first_turn_is_checked(self):
+        with Project(code=FIXED) as p:
+            ctx = ctx_for(p)
+            ctx.commands["necro"]("freeze")
+            ctx.hooks["pre_llm_call"](session_id="f1", user_message="tidy up tipsplit.py", conversation_history=[],
+                                      is_first_turn=True, model="m", platform="cli")
+            p.write("tipsplit.py", BUGGY)  # a sed -i from the terminal during the first turn
+            out = transform(ctx, "Tidied it up.", session="f1")
+            self.assertTrue(out and out.startswith("Not done."), out)
+
+    def test_an_untouched_project_stays_unstamped_in_the_first_turn(self):
+        with Project(code=FIXED) as p:
+            ctx = ctx_for(p)
+            ctx.commands["necro"]("freeze")
+            ctx.hooks["pre_llm_call"](session_id="f2", user_message="what does split_bill do?", conversation_history=[],
+                                      is_first_turn=True, model="m", platform="cli")
+            self.assertIsNone(transform(ctx, "It splits a bill into shares.", session="f2"))
+
+
 if __name__ == "__main__":
     unittest.main()

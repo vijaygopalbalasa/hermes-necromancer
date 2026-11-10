@@ -143,9 +143,19 @@ class NecroPlugin:
 
     # ---- hooks ---------------------------------------------------------------------------
     def on_pre_llm_call(self, session_id="", **kwargs):
-        """A new turn starts: forget which projects the previous turn's gate checked."""
+        """A new turn starts: forget which projects the previous turn's gate checked, and record a
+        baseline for the session's frozen project the first time it is seen, so an edit made only
+        through the shell, even in this first turn, is noticed when the reply is stamped."""
         if session_id:
             self.turns.pop(session_id, None)
+        try:
+            root = lock.find_root(self.cwd())
+            if root is not None and str(root) not in self.seen:
+                digest = gate.fingerprint(root, self._deadline("gate_budget_seconds", GATE_BUDGET_S))
+                if digest is not None:
+                    self.seen[str(root)] = (digest, ())
+        except Exception:
+            logger.debug("contract-necromancer: no baseline this turn", exc_info=True)
         return None
 
     def on_pre_verify(self, session_id="", changed_paths=None, attempt=0, **kwargs):
