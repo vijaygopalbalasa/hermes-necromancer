@@ -106,14 +106,18 @@ def verify_receipt(receipt_file, cwd=None, budget_s: float | None = None, approv
                 changed.add(f["path"])
     pins = {s["path"]: s for s in rc.get("sources", [])}
     local_only = []  # pins another checkout may lack: files git ignored, and credential files
+    uncompared = []  # credential files whose size or modification time differs: never opened, never compared
     for rel, entry in pins.items():
         # file_pin decides by the file's name, whatever the receipt says, so a credential file is never
         # opened; its pin is its size and modification time.
+        credential = is_credential_path(root / rel)
         now = file_pin(root / rel)
         want = ({"size": entry.get("size"), "mtimeNs": entry.get("mtimeNs")} if entry.get("credential")
                 else entry.get("sha256"))
-        if now is None and (entry.get("ignored") or is_credential_path(root / rel)):
+        if now is None and (entry.get("ignored") or credential):
             local_only.append(rel)
+        elif now != want and credential and entry.get("credential"):
+            uncompared.append(rel)  # every clone or copy shows a new modification time; the re-run decides
         elif now != want:
             changed.add(rel)
     try:
@@ -133,7 +137,7 @@ def verify_receipt(receipt_file, cwd=None, budget_s: float | None = None, approv
         if added:
             parts.append(f"Files added: {', '.join(added)}.")
         return _mismatch(" ".join(parts), sorted(changed) + added)
-    notes = _notes(sorted(local_only), local_credentials)
+    notes = _notes(sorted(local_only), local_credentials, sorted(uncompared))
 
     trusted = run or (isinstance(approved, dict) and approved.get(str(root)) == lock_hash(lk))
     if not trusted:
@@ -167,9 +171,15 @@ def verify_receipt(receipt_file, cwd=None, budget_s: float | None = None, approv
     return VerifyResult("CONFIRMED", f"CONFIRMED {rc['receiptHash']}{notes}.")
 
 
-def _notes(local_only: list, local_credentials: list) -> str:
+def _notes(local_only: list, local_credentials: list, uncompared: list = ()) -> str:
     """What differs in this checkout without being a mismatch by itself, for the verdict line."""
     parts = []
+    if uncompared:
+        n = len(uncompared)
+        one = n == 1
+        parts.append(f"{n} credential file{'' if one else 's'} {'differs' if one else 'differ'} in size or modification "
+                     f"time and {'was' if one else 'were'} not compared, as necro never opens {'it' if one else 'them'}: "
+                     f"{', '.join(uncompared)}")
     if local_only:
         n = len(local_only)
         parts.append(f"{n} local-only file{'s' if n != 1 else ''} not present here: {', '.join(local_only)}")

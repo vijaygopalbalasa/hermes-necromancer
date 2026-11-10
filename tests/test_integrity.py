@@ -287,7 +287,8 @@ class CredentialFiles(unittest.TestCase):
             self.assertEqual(out.verdict, "CONFIRMED", out.message)
             self.assertNotIn("local-only", out.message)
 
-    def test_a_credential_file_changed_after_the_receipt_is_a_mismatch_naming_it(self):
+    def test_a_credential_file_changed_after_the_receipt_is_noted_and_the_rerun_decides(self):
+        # Never opened, so never compared: a size or time that differs is what every clone shows (Nov 10, late).
         with Project(code=FIXED) as p:
             p.write(".env", SECRET + "\n")
             lock.freeze(p.dir)
@@ -297,9 +298,24 @@ class CredentialFiles(unittest.TestCase):
             with credential_opens(p.dir) as opened:
                 out = verify.verify_receipt(v.receipt_path, run=True)
             self.assertEqual(opened, [])
-            self.assertEqual(out.verdict, "MISMATCH", out.message)
-            self.assertIn(".env", out.message)
+            self.assertEqual(out.verdict, "CONFIRMED", out.message)
+            self.assertIn("1 credential file differs in size or modification time and was not compared, as necro never "
+                          "opens it: .env", out.message)
             self.assertNotIn("necro-test-value-8231", out.message)
+
+    def test_a_credential_change_that_breaks_a_contract_is_caught_by_the_rerun(self):
+        with Project(code=FIXED) as p:
+            p.write(".env", "MODE=fair\n")
+            p.write("contracts/test_refuses_zero.py",
+                    "import unittest\nclass T(unittest.TestCase):\n    def test_mode(self):\n"
+                    "        self.assertEqual(open('.env').read(), 'MODE=fair\\n')\n")
+            lock.freeze(p.dir)
+            v = gate.evaluate(p.dir, budget_s=60)
+            self.assertTrue(v.ok, v.problems)
+            p.write(".env", "MODE=lax\n")
+            out = verify.verify_receipt(v.receipt_path, run=True)
+            self.assertEqual(out.verdict, "MISMATCH", out.message)
+            self.assertIn("C3 (pass then, fail now)", out.message)
 
     def test_a_copy_without_the_credential_file_is_confirmed_with_a_note(self):
         with Project(code=FIXED) as p:
@@ -377,6 +393,23 @@ class VerifyExtras(unittest.TestCase):
             out = verify.verify_receipt(copy / v.receipt_path.relative_to(g.author), run=True)
             self.assertEqual(out.verdict, "MISMATCH", out.message)
             self.assertIn("unittest.py", out.message)
+        finally:
+            g.cleanup()
+
+    def test_a_committed_credential_named_file_confirms_in_a_fresh_clone(self):
+        # A committed .npmrc (registry settings, no secret) gets a new modification time in every clone.
+        g = GitWork(FIXED)
+        try:
+            (g.author / ".npmrc").write_text("engine-strict=true\n")
+            lock.freeze(g.author)
+            v = gate.evaluate(g.author, budget_s=120)
+            self.assertTrue(v.ok, v.problems)
+            clone = g.commit_and_clone()
+            with credential_opens(clone) as opened:
+                out = verify.verify_receipt(clone / v.receipt_path.relative_to(g.author), run=True)
+            self.assertEqual(opened, [])
+            self.assertEqual(out.verdict, "CONFIRMED", out.message)
+            self.assertIn("was not compared, as necro never opens it: .npmrc", out.message)
         finally:
             g.cleanup()
 

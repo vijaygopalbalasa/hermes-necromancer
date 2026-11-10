@@ -106,17 +106,18 @@ contract cannot freeze a credential file. Never walked, pinned or checked: versi
 `.DS_Store` files. A contract run may write in those folders; any other file it creates or changes, ignored or not,
 fails the check unless `necro.toml` declares it under `outputs`.
 
-`verify` checks the receipt's hash, re-checks every pinned file (a credential file by size and modification time),
-looks for added files and checks that the lock is exactly what freezing `necro.toml` would write. It re-runs the
-contracts only when a person approved that lock for that folder, or when you add `--run` after reading `necro.toml`,
-because re-running executes the project's commands. In another checkout, such as a fresh clone, a pin marked `ignored`
-or `credential` that is missing there is listed as local-only, not a mismatch by itself, and the re-run decides:
-`CONFIRMED <hash> (1 local-only file not present here: .env).` A tracked pin that differs, or a local-only pin that is
-present but differs, is a `MISMATCH`; a credential file differs when its size or modification time does, so a copied
-or touched `.env` counts as changed. A file the receipt does not pin is added, a `MISMATCH`, even when git ignores it
-(an ignored `unittest.py` can change a run); only a credential file is noted instead: `(1 local credential file not in
-the receipt: .env)`. The answer is `CONFIRMED`, `MISMATCH` (naming what changed), `SUPERSEDED` (frozen again since),
-or `HASHES MATCH` (files match but nothing was re-run; not a confirmation).
+`verify` checks the receipt's hash, re-hashes every pinned file except credential files, looks for added files and
+checks that the lock is exactly what freezing `necro.toml` would write. It re-runs the contracts only when a person
+approved that lock for that folder, or when you add `--run` after reading `necro.toml`, because re-running executes
+the project's commands. In another checkout, such as a fresh clone, a pin marked `ignored` or `credential` that is
+missing there is listed as local-only, not a mismatch by itself, and the re-run decides: `CONFIRMED <hash> (1
+local-only file not present here: .env).` A tracked pin that differs, or an ignored pin that is present but differs,
+is a `MISMATCH`. A credential file is never compared, because it is never opened: one whose size or modification time
+differs, as in any clone or copy, is noted, and the re-run decides. A file the receipt does not pin is added, a
+`MISMATCH`, even when git ignores it (an ignored `unittest.py` can change a run); only a credential file is noted
+instead: `(1 local credential file not in the receipt: .env)`. The answer is `CONFIRMED`, `MISMATCH` (naming what
+changed), `SUPERSEDED` (frozen again since), or `HASHES MATCH` (files match but nothing was re-run; not a
+confirmation).
 
 ## Settings
 
@@ -140,8 +141,9 @@ Under `plugins.entries.contract-necromancer.settings`: `gate_budget_seconds` (25
   local run pass; it is pinned and listed in the receipt, and `verify --run` in a fresh clone, which lacks it, fails.
   One that is only in the checkout that verifies is reported as added.
   Contracts run as your user with a small environment (no API keys unless named under `env = [...]`).
-- **Credential files are never opened.** Their pins hold size and modification time only, so an edit to `.env` that
-  keeps both is not detected.
+- **Credential files are never opened.** A contract run that changes one's size or modification time fails, but an
+  edit to `.env` that keeps both is not seen, and `verify` only notes a credential file that differs; the re-run
+  decides.
 - **Slow or huge.** Contracts slower than the gate's budget are reported as not checked (the agent is told to run
   `necro_check`, which has 10 minutes); in a very large project, list the files that matter under `sources`.
 - Tested on macOS with Hermes 0.23.1 and 0.22.7, Python 3.11 and 3.14. Linux and Windows are untested here; the CI
