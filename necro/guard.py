@@ -254,10 +254,21 @@ def _find_is_destructive(args: list) -> bool:
         return True
     for i, a in enumerate(args):
         if a in FIND_RUNNERS:
-            program = os.path.basename(args[i + 1]) if i + 1 < len(args) else ""
-            if program not in FIND_READ_ONLY:
+            program = args[i + 1] if i + 1 < len(args) else ""
+            if "/" in program or program.lower() not in FIND_READ_ONLY:  # a path could be any script
                 return True
     return False
+
+
+def _bare(token: str) -> str:
+    """A token without the shell syntax wrapped around it: $( ( ) { } backticks, quotes and ;."""
+    while True:
+        before = token
+        if token.startswith("$("):
+            token = token[2:]
+        token = token.lstrip("({`\"'").rstrip(")}`\"';")
+        if token == before:
+            return token
 
 
 def _tokens(text: str) -> list:
@@ -360,9 +371,9 @@ def _shell_block(cmd: str, wd: str, store_dir: str | None, frozen_roots=()) -> s
             if r and r not in roots:
                 roots.append(r)
     for chunk in [cmd] + SEGMENT_SPLIT.split(cmd):
-        tokens = _tokens(chunk)
+        tokens = [_bare(t) for t in _tokens(chunk)]
         for i, token in enumerate(tokens):
-            if os.path.basename(token) in ("find", "gfind"):
+            if os.path.basename(token).lower() in ("find", "gfind"):
                 msg = _find_block(tokens[i + 1:], wd, frozen_roots)
                 if msg:
                     return msg

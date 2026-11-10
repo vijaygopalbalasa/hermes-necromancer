@@ -191,5 +191,33 @@ class Round5(unittest.TestCase):
             self.assertTrue(self.blocked("terminal", cmd), cmd)
 
 
+class FindTokenEdges(unittest.TestCase):
+    """Last guard holes (Nov 10): a path as the -exec program, upper-case FIND, and find wrapped in shell syntax."""
+
+    def setUp(self):
+        self.p = Project(code=FIXED)
+        lock.freeze(self.p.dir)
+
+    def tearDown(self):
+        self.p.cleanup()
+
+    def blocked(self, cmd):
+        return guard.check_tool_call("terminal", {"command": cmd}, str(self.p.dir)) is not None
+
+    def test_a_path_as_the_exec_program_is_not_a_reader(self):
+        self.assertTrue(self.blocked("find . -name '*.py' -exec ./grep {} ;"))
+        self.assertTrue(self.blocked("find . -name '*.py' -exec /tmp/cat {} +"))
+        self.assertFalse(self.blocked("find . -name '*.py' -exec grep -n split {} +"))
+
+    def test_find_is_matched_without_regard_to_case(self):
+        self.assertTrue(self.blocked("FIND . -delete"))
+        self.assertTrue(self.blocked("GFind . -delete"))
+
+    def test_find_wrapped_in_shell_syntax_is_recognised(self):
+        for cmd in ("echo $(find . -delete)", "echo `find . -delete`", "(find . -delete)", "{ find . -delete; }",
+                    "echo \"$(find . -delete)\""):
+            self.assertTrue(self.blocked(cmd), cmd)
+
+
 if __name__ == "__main__":
     unittest.main()
