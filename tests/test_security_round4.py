@@ -254,13 +254,21 @@ class FindTextRule(unittest.TestCase):
         self.assertTrue(self.blocked("find . -name '*.py' -exec 'GREP' -n x {} +"))
 
     def test_a_find_from_outside_that_names_the_frozen_project_is_blocked(self):
+        # The plain-text rule (review, Nov 10 late): the project's path, or a folder above it, anywhere in the text
+        # once quotes and backslashes are dropped. Quoting and globs cannot hide it.
         outside = tempfile.mkdtemp(prefix="necro-outside-")
         self.addCleanup(shutil.rmtree, outside, True)
-        for cmd in (f"find {self.p.dir} -delete", f"find {self.p.dir}/contracts -name '*.py' -exec rm {{}} +"):
-            self.assertIsNotNone(guard.check_tool_call("terminal", {"command": cmd}, outside), cmd)
-        code = f"import subprocess\nsubprocess.run(['find', '{self.p.dir}', '-delete'])\n"
-        self.assertIsNotNone(guard.check_tool_call("execute_code", {"code": code}, outside))
-        self.assertIsNone(guard.check_tool_call("terminal", {"command": f"find {outside} -delete"}, outside))
+        roots = [str(self.p.dir)]
+        d, up = self.p.dir, self.p.dir.parent
+        for cmd in (f"find {d} -delete", f"find '{d}'/contracts -name '*.py' -exec rm {{}} +", f'find "{up}" -delete',
+                    f"find {up}/ -delete", f"find {up}/* -delete", f"find {up}/{d.name[:6]}* -delete"):
+            self.assertIsNotNone(guard.check_tool_call("terminal", {"command": cmd}, outside, frozen_roots=roots), cmd)
+        code = f"import subprocess\nsubprocess.run(['find', '{d}', '-delete'])\n"
+        self.assertIsNotNone(guard.check_tool_call("execute_code", {"code": code}, outside, frozen_roots=roots))
+        code = f"import subprocess\nsubprocess.run(['find', '{up}', '-delete'])\n"
+        self.assertIsNotNone(guard.check_tool_call("execute_code", {"code": code}, outside, frozen_roots=roots))
+        self.assertIsNone(guard.check_tool_call("terminal", {"command": f"find {outside} -delete"}, outside,
+                                                frozen_roots=roots))
 
 
 if __name__ == "__main__":

@@ -244,7 +244,8 @@ FIND_WORD = re.compile(r"(?:^|[^a-z0-9_./-])g?find\b")
 FIND_WRITES = re.compile(r"-(?:delete|fprint0|fprintf|fprint|fls)\b")
 FIND_RUNS = re.compile(r"(?:^|\s)-(?:execdir|exec|okdir|ok)\b(?:\s+(\S+))?")
 FIND_SPLICE = str.maketrans("", "", "'\"\\")  # fi''nd and -de\lete are find and -delete to a shell
-PATH_TOKEN = re.compile(r"""[^\s'"`,;()\[\]<>|&=]+""")
+# After a folder above a frozen project: that path ends, or a glob that may reach into it follows.
+UP_END = r"/?(?:(?![\w.@+~/-])|[^\s/,\]]*[*?\[])"
 FIND_BLOCK = ("Blocked by Contract Necromancer: a find that deletes, writes or runs a program other than a read-only "
               "one is not allowed in or over a frozen project ({root}). Name the files you mean one by one; the frozen "
               "contracts and .necro stay.")
@@ -265,17 +266,16 @@ def _find_text_writes(text: str) -> bool:
 
 
 def _find_near(text: str, wd: str, frozen_roots=()) -> Path | None:
-    """The frozen project a find that writes would reach: from the working folder, or a path it names."""
+    """The frozen project a find that writes would reach: from the working folder, or because the text, with
+    quotes and backslashes dropped and $VARS expanded, names a frozen project's path or a folder above it."""
     if not _find_text_writes(text):
         return None
-    near = _frozen_near(wd, frozen_roots)
-    for token in dict.fromkeys(PATH_TOKEN.findall(text)):
-        if near is None and ("/" in token or token.startswith(("~", "$", "."))):
-            try:
-                near = _frozen_near(str(_resolve(token, wd)), frozen_roots)
-            except (OSError, ValueError):
-                pass
-    return near
+    plain = os.path.expandvars(text.translate(FIND_SPLICE)).lower()
+    for r in frozen_roots or ():
+        ups = [str(u) for u in Path(str(r).lower()).parents if str(u) != "/"]
+        if str(r).lower() in plain or any(re.search(re.escape(u) + UP_END, plain) for u in ups):
+            return Path(r)
+    return _frozen_near(wd, frozen_roots)
 
 
 def _frozen_near(wd: str, frozen_roots=()) -> Path | None:
