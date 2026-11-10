@@ -5,8 +5,10 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
+from pathlib import Path
 
 from helpers import BUGGY, FIXED, HALF_FIX, Project
 
@@ -30,14 +32,31 @@ def transform(ctx, text, session="s1"):
 
 
 class UnpinnedFilesCannotDecide(unittest.TestCase):
-    def test_a_shadow_module_hidden_from_git_is_pinned_and_visible(self):
-        with Project(code=BUGGY) as p:
-            subprocess.run(["git", "init", "-q"], cwd=p.dir, check=True)
-            lock.freeze(p.dir)
-            p.write("unittest.py", "raise SystemExit(0)\n")
-            (p.dir / ".git" / "info").mkdir(parents=True, exist_ok=True)
-            (p.dir / ".git" / "info" / "exclude").write_text("unittest.py\n")
-            self.assertIn("unittest.py", receipts.source_files(p.dir, lock.read_lock(p.dir)))
+    def test_a_shadow_module_hidden_from_git_is_caught_by_verify_in_a_fresh_clone(self):
+        # Since the judge review, a git project pins only what git tracks or would track, so a shadow
+        # module hidden with .git/info/exclude is not pinned. It passes locally; a fresh clone catches it.
+        work = Path(tempfile.mkdtemp(prefix="necro-shadow-")).resolve()
+        try:
+            with Project(code=BUGGY) as p:
+                env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+                       "GIT_COMMITTER_EMAIL": "t@t", "GIT_CONFIG_NOSYSTEM": "1", "HOME": str(work)}
+                git = lambda *a, cwd=p.dir: subprocess.run(["git", *a], cwd=cwd, env=env, check=True, capture_output=True)
+                git("init", "-q")
+                lock.freeze(p.dir)
+                p.write("unittest.py", "raise SystemExit(0)\n")
+                (p.dir / ".git" / "info").mkdir(parents=True, exist_ok=True)
+                (p.dir / ".git" / "info" / "exclude").write_text("unittest.py\n")
+                v = gate.evaluate(p.dir, budget_s=60)
+                self.assertTrue(v.ok, "the shadow makes the local run pass")
+                self.assertNotIn("unittest.py", receipts.source_files(p.dir, lock.read_lock(p.dir)))
+                git("add", "-A")
+                git("commit", "-qm", "x")
+                git("clone", "-q", str(p.dir), str(work / "clone"), cwd=work)
+                out = verify.verify_receipt(work / "clone" / v.receipt_path.relative_to(p.dir), run=True)
+                self.assertEqual(out.verdict, "MISMATCH", out.message)
+                self.assertIn("C1", out.message)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
 
     def test_stale_bytecode_in_pycache_is_not_used(self):
         with Project(code=FIXED) as p:

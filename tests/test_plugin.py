@@ -58,11 +58,20 @@ class FakeCtx:
     def register_cli_command(self, name, help, setup_fn, handler_fn=None, description=""):
         self.cli[name] = (setup_fn, handler_fn)
 
+    def register_session_env(self, names, resolver):
+        self.session_env = {name: resolver for name in names}
+
     def get_config(self, key, default=None):
         return self.config.get(key, default)
 
     def session_cwd(self):
         return self.cwd
+
+
+class OldHermesCtx(FakeCtx):
+    """A context from Hermes before 0.23.1, which has no register_session_env."""
+
+    register_session_env = None
 
 
 def plugin_for(project, **config):

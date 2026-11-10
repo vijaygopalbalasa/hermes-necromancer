@@ -95,6 +95,9 @@ class _DemoCtx:
     def register_cli_command(self, *a, **kw):
         pass
 
+    def register_session_env(self, names, resolver):
+        self.session_env = {name: resolver for name in names}
+
     def get_config(self, key, default=None):
         return default
 

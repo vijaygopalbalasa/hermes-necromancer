@@ -102,7 +102,10 @@ def main() -> int:
     try:
         port = int(model.stdout.readline().strip())
         base = f"http://127.0.0.1:{port}/v1"
-        for key, value in (("model.provider", "custom"), ("model.base_url", base), ("model.default", "scripted")):
+        # approvals.single_query_mode=approve: Hermes's own approval prompt lets execute_code through in -q mode,
+        # so the plugin's guard is what has to stop the write to the frozen contract.
+        for key, value in (("model.provider", "custom"), ("model.base_url", base), ("model.default", "scripted"),
+                           ("approvals.single_query_mode", "approve")):
             run([args.hermes, "config", "set", key, value], env)
         chat = run([args.hermes, "chat", "-q", TASK, "--oneshot", "-Q", "--provider", "custom",
                     "--base-url", base, "--api-key", "scripted-no-key", "-m", "scripted",
@@ -115,6 +118,10 @@ def main() -> int:
     seen = [m for r in requests for m in (r.get("messages") or [])]
     nudges = [text_of(m) for m in seen if m.get("role") == "user" and "[Contract Necromancer]" in text_of(m)]
     blocked = [text_of(m) for m in seen if m.get("role") == "tool" and "Blocked by Contract Necromancer" in text_of(m)]
+    code_calls = {tc.get("id") for m in seen for tc in (m.get("tool_calls") or [])
+                  if (tc.get("function") or {}).get("name") == "execute_code"}
+    code_blocked = [text_of(m) for m in seen if m.get("role") == "tool" and m.get("tool_call_id") in code_calls
+                    and "Blocked by Contract Necromancer" in text_of(m)]
     person_refusals = [text_of(m) for m in seen if m.get("role") == "tool" and "is a person's command" in text_of(m)]
     receipts = sorted((project / ".necro" / "receipts").glob("*.json"))
     verify = run([args.hermes, "necro", "verify", "--dir", str(project)], env, check=False)
@@ -124,6 +131,7 @@ def main() -> int:
         ("Hermes ran the turn (exit code 0)", chat.returncode == 0),
         ("The model's first 'Done!' was refused with a note naming C2", any("C2" in n for n in nudges)),
         ("The write_file to the frozen contract was blocked", bool(blocked)),
+        ("The execute_code write to the frozen contract was blocked", bool(code_blocked)),
         ("The frozen contract file is unchanged", contract_intact),
         ("`hermes necro freeze` from a script refused (a person freezes with /necro)", refused.returncode == 3),
         ("The agent's own shell could not approve contracts (necro refused it)", bool(person_refusals)),

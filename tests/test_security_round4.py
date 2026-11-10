@@ -11,7 +11,7 @@ from pathlib import Path
 from helpers import FIXED, REPO, Project
 
 from necro import commands, gate, guard, lock, spec
-from test_plugin import FakeCtx, load_plugin
+from test_plugin import FakeCtx, OldHermesCtx, load_plugin
 
 
 class Outputs(unittest.TestCase):
@@ -61,7 +61,7 @@ class OverLongInput(unittest.TestCase):
 class MarkerWarning(unittest.TestCase):
     def test_a_missing_register_session_env_is_a_warning_not_a_debug_line(self):
         with Project() as p:
-            ctx = FakeCtx(p.dir)
+            ctx = OldHermesCtx(p.dir)
             module = load_plugin()
             with self.assertLogs(module.logger.name, level="WARNING") as logs:
                 module.register(ctx)

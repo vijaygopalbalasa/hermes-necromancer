@@ -1,22 +1,24 @@
 # Acceptance contracts for the tip splitter.
 # Each contract is a command that exits 0 when the work is right, plus the files it freezes.
-# A person reads these, then runs /necro freeze. After that Hermes cannot call the work done
-# while one of them fails, and it cannot edit them.
+# Every contract freezes the whole contracts folder: a test depends on everything Python imports
+# from there (an __init__.py, a helper), so a new file in it counts as tampering too.
+# A person reads these, then types /necro freeze in the Hermes chat. After that Hermes cannot call
+# the work done while one of them fails, and it cannot edit them.
 
 [[contract]]
 id = "C1"
 says = "Shares add up to the total"
 run = "python3 -m unittest -q contracts.test_adds_up"
-files = ["contracts/test_adds_up.py"]
+files = ["contracts/**"]
 
 [[contract]]
 id = "C2"
 says = "No share differs from another by more than one cent"
 run = "python3 -m unittest -q contracts.test_fair"
-files = ["contracts/test_fair.py"]
+files = ["contracts/**"]
 
 [[contract]]
 id = "C3"
 says = "Zero people is refused"
 run = "python3 -m unittest -q contracts.test_refuses_zero"
-files = ["contracts/test_refuses_zero.py"]
+files = ["contracts/**"]

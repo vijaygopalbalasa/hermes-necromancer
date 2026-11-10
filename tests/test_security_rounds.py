@@ -1,6 +1,8 @@
 """Findings from three automated security review rounds (Nov 10), each reproduced before its fix."""
 
 import argparse
+import contextlib
+import io
 import shlex
 import json
 import os
@@ -13,7 +15,7 @@ from pathlib import Path
 from helpers import FIXED, HALF_FIX, REPO, Project, spec_text
 
 from necro import commands, gate, guard, lock, verify
-from test_plugin import FakeCtx, load_plugin
+from test_plugin import FakeCtx, OldHermesCtx, load_plugin
 
 
 def ctx_for(p):
@@ -283,10 +285,13 @@ class R3PersonOnlyCommands(unittest.TestCase):
 
     def test_a_cli_without_register_session_env_refuses_and_writes_nothing(self):
         with Project(code=FIXED) as p:
-            ctx = FakeCtx(p.dir)  # no register_session_env, like Hermes before 0.23.1
-            plugin = load_plugin().register(ctx)
+            ctx = OldHermesCtx(p.dir)  # no register_session_env, like Hermes before 0.23.1
+            module = load_plugin()
+            with self.assertLogs(module.logger.name, level="WARNING"):
+                plugin = module.register(ctx)
             self.assertFalse(plugin.session_env_ok)
-            code = plugin.cli_run(argparse.Namespace(action="freeze", receipt=None, dir=str(p.dir), run=False))
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = plugin.cli_run(argparse.Namespace(action="freeze", receipt=None, dir=str(p.dir), run=False))
             self.assertEqual(code, 3)
             self.assertIsNone(lock.read_lock(p.dir))
 

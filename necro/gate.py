@@ -12,7 +12,7 @@ from .canon import BudgetExceeded, canonical_json, check_deadline, hash_file, sh
 from .lock import LOCK_REL, LockError, build_lock, drift, frozen_paths, lock_hash, read_lock
 from .receipts import SourcesError, build_receipt, source_files, write_receipt
 from .runner import all_pass, run_contracts
-from .spec import SpecError, expand, walk_files
+from .spec import SpecError, expand, matches, walk_files
 
 LABEL = "Contract Necromancer"
 WORD = {
@@ -64,17 +64,22 @@ POST_RUN_GRACE_S = 3.0
 
 
 def snapshot(root: Path, lk: dict, files: list, deadline=None) -> tuple:
-    """Hashes of every file a verdict depends on: the frozen files (and any file now under a frozen
-    pattern) and every source file. Returns (path -> sha256, source paths)."""
+    """Hashes of every file a verdict depends on. Returns (path -> sha256, source paths, watched paths).
+
+    The hashes cover every walked file, ignored ones too, so a cached result is reused only while
+    nothing at all changed. ``watched`` (frozen files and the files a receipt pins) is what a contract
+    run must leave alone."""
     frozen = set(frozen_paths(lk))
     for c in lk.get("contracts", []):
         frozen.update(expand(root, c.get("patterns") or [], strict=False, files=files))
     sources = source_files(root, lk, files=files)
+    outputs = lk.get("outputs") or []
+    everything = {rel for rel in files if not any(matches(rel, pat) for pat in outputs)}
     snap = {}
-    for rel in sorted(frozen | set(sources)):
+    for rel in sorted(frozen | set(sources) | everything):
         snap[rel] = hash_file(root / rel, deadline)
         check_deadline(deadline)
-    return snap, sources
+    return snap, sources, frozen | set(sources)
 
 
 def _digest(lh: str, snap: dict) -> str:
@@ -108,7 +113,7 @@ def fingerprint(root, deadline=None) -> str | None:
     if lk is None:
         return None
     files = walk_files(root, deadline)
-    snap, _ = snapshot(root, lk, files, deadline)
+    snap, _, _ = snapshot(root, lk, files, deadline)
     return _digest(lock_hash(lk), snap)
 
 
@@ -140,7 +145,7 @@ def evaluate(root, *, budget_s: float | None = None, deadline: float | None = No
         if not d.any() and lock_hash(build_lock(root, files=files)) != lh:
             problems.append(f"{LOCK_REL} does not match necro.toml and the frozen files, so it was not written by "
                             "freezing them. A person checks `git diff .necro/` and freezes again")
-        before, _ = snapshot(root, lk, files, deadline)
+        before, _, watched_before = snapshot(root, lk, files, deadline)
         key = str(root)
         hit = cache.get(key) if cache is not None else None
         if hit and hit["lock"] == lh and _digest(lh, before) == hit["digest"]:
@@ -150,8 +155,8 @@ def evaluate(root, *, budget_s: float | None = None, deadline: float | None = No
             cached = False
             results = run_contracts(root, lk, deadline=deadline, drift_result=d)
             grace = None if deadline is None else max(deadline, time.monotonic()) + POST_RUN_GRACE_S
-            after, sources = snapshot(root, lk, walk_files(root, grace), grace)
-            changed = sorted(p for p in set(before) | set(after) if before.get(p) != after.get(p))
+            after, sources, watched_after = snapshot(root, lk, walk_files(root, grace), grace)
+            changed = sorted(p for p in watched_before | watched_after if before.get(p) != after.get(p))
             if changed:
                 shown = ", ".join(changed[:10]) + (" and more" if len(changed) > 10 else "")
                 problems.append(f"the contract run changed {shown}. Code under test must not change project files; "
@@ -250,11 +255,25 @@ _NEGATED = re.compile(r"(?:\bnot(?: yet)?|n't|\bnever|\bno longer|\bnothing|\bca
 _ADDRESSED = re.compile(r"\b(?:when|once|if|until|unless|whether)\b[^.!?;:]{0,40}$", re.IGNORECASE)
 
 
+# "finished reading", "done looking", "completed the review": the agent finished looking, not the work.
+_JUST_LOOKED = re.compile(
+    r"^\s*(?:(?:reading|looking|reviewing|going\s+through|checking|scanning|skimming|analy[sz]ing|investigating|"
+    r"exploring|inspecting|studying|examining)\b|(?:the|my|a|your)\s+(?:review|reading|look|investigation|"
+    r"analysis|audit|read-through)\b)",
+    re.IGNORECASE,
+)
+
+
 def looks_like_done(text: str) -> bool:
-    """True when a reply claims the work is finished (and does not deny it, or talk about the
-    person being done)."""
-    for m in _DONE.finditer(text or ""):
+    """True when a reply claims the work is finished. Not when it denies it, talks about the person
+    being done, says it finished reading or reviewing, or ends by asking the person a question."""
+    text = text or ""
+    if text.rstrip().endswith("?"):
+        return False
+    for m in _DONE.finditer(text):
         before = text[max(0, m.start() - 40): m.start()]
-        if not _NEGATED.search(before) and not _ADDRESSED.search(before):
-            return True
+        after = text[m.end(): m.end() + 40]
+        if _NEGATED.search(before) or _ADDRESSED.search(before) or _JUST_LOOKED.search(after):
+            continue
+        return True
     return False
