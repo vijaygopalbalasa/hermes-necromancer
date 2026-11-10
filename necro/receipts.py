@@ -10,7 +10,7 @@ from pathlib import Path
 from .canon import canonical_json, hash_file, sha256_text, utc_now, write_json_atomic
 from .lock import frozen_paths, lock_hash
 from .runner import all_pass
-from .spec import expand, skipped, walk_files
+from .spec import expand, matches, skipped, walk_files
 
 RECEIPTS_REL = ".necro/receipts"
 RECEIPT_KIND = "hermes-necromancer/receipt"
@@ -43,15 +43,17 @@ def git_head(root: Path) -> str | None:
 def source_files(root, lk: dict, files=None, deadline=None) -> list:
     """Project files a receipt pins: the declared ``sources`` globs, else every regular file in the
     project, whatever .gitignore says (a file git ignores can still change what a test does), minus
-    caches, installed dependencies, the .necro folder and the frozen contract files, which are
-    pinned on their own."""
+    caches, installed dependencies, the .necro folder, the files a person declared under outputs and
+    the frozen contract files, which are pinned on their own."""
     root = Path(root).resolve()
     frozen = frozen_paths(lk)
     if files is None:
         files = walk_files(root, deadline)
     if lk.get("sources"):
         files = expand(root, lk["sources"], strict=False, where="sources", files=files)
-    out = sorted(rel for rel in files if rel not in frozen and not skipped(rel))
+    outputs = lk.get("outputs") or []
+    out = sorted(rel for rel in files
+                 if rel not in frozen and not skipped(rel) and not any(matches(rel, pat) for pat in outputs))
     if len(out) > MAX_SOURCES:
         raise SourcesError(
             f"{len(out)} files would be pinned; a person should add sources = [\"src/**/*.py\", ...] to "
@@ -69,11 +71,10 @@ def receipt_hash(receipt: dict) -> str:
 
 
 def build_receipt(root, lk: dict, results, trigger: str | None = None, now: str | None = None,
-                  pins=None, outputs=()) -> dict:
+                  pins=None) -> dict:
     """A receipt for a run in which every frozen contract passed. Refuses anything less.
 
-    ``pins`` are the source hashes to record (taken by the caller around the run); ``outputs`` are
-    files the contracts themselves wrote during the run, listed but not pinned."""
+    ``pins`` are the source hashes to record (taken by the caller after the run)."""
     root = Path(root).resolve()
     results = list(results)
     by_id = {r.id: r for r in results}
@@ -98,8 +99,6 @@ def build_receipt(root, lk: dict, results, trigger: str | None = None, now: str 
         "sources": list(pins) if pins is not None else pin(root, source_files(root, lk)),
         "gitCommit": git_head(root),
     }
-    if outputs:
-        receipt["outputs"] = sorted(outputs)
     receipt["receiptHash"] = receipt_hash(receipt)
     receipt["createdAt"] = now or utc_now()
     receipt["trigger"] = trigger

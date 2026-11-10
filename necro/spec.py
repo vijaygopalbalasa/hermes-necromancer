@@ -1,6 +1,7 @@
 """necro.toml: the acceptance contracts a person writes (or reviews) before freezing them.
 
     sources = ["src/**/*.py"]          # optional: files a receipt pins (default: the whole project)
+    outputs = ["reports/*.xml"]        # optional: files the contracts may write while they run
 
     [[contract]]
     id = "C1"                          # short, unique
@@ -39,7 +40,7 @@ SKIP_SUFFIXES = (".pyc", ".pyo")
 SKIP_NAMES = {".DS_Store"}
 MAX_FILES = 50000
 CONTRACT_KEYS = {"id", "says", "run", "files", "timeout", "env"}
-TOP_KEYS = {"contract", "sources"}
+TOP_KEYS = {"contract", "sources", "outputs"}
 
 
 def skipped(rel: str) -> bool:
@@ -127,6 +128,7 @@ class Contract:
 class Spec:
     contracts: list
     sources: list | None
+    outputs: list | None = None
 
 
 def _check_pattern(pattern: str, where: str) -> None:
@@ -234,10 +236,13 @@ def load_spec(root) -> Spec:
         if c.id in seen:
             raise SpecError(f"{SPEC_NAME}: the id {c.id} is used twice")
         seen.add(c.id)
-    sources = data.get("sources")
-    if sources is not None:
-        if not isinstance(sources, list) or not sources:
-            raise SpecError(f"{SPEC_NAME}: 'sources' must be a non-empty list of file patterns")
-        for pattern in sources:
-            _check_pattern(pattern, "sources")
-    return Spec(contracts=contracts, sources=list(sources) if sources is not None else None)
+    lists = {}
+    for key in ("sources", "outputs"):
+        value = data.get(key)
+        if value is not None:
+            if not isinstance(value, list) or not value:
+                raise SpecError(f"{SPEC_NAME}: '{key}' must be a non-empty list of file patterns")
+            for pattern in value:
+                _check_pattern(pattern, key)
+            lists[key] = list(value)
+    return Spec(contracts=contracts, sources=lists.get("sources"), outputs=lists.get("outputs"))

@@ -66,6 +66,7 @@ def _plugin_module():
 class _State:
     def __init__(self):
         self.data = {}
+        self.path = Path(tempfile.mkdtemp(prefix="necro-demo-state-")) / "state.json"
 
     def get(self, key, default=None):
         return json.loads(json.dumps(self.data.get(key, default)))
@@ -156,15 +157,16 @@ def run_demo(keep: bool = True) -> str:
     (project / "tipsplit.py").write_text(FIXED)
     gate("Fixed: leftover cents go one each to the first people, so shares add up and differ by at most a cent.", "demo-3")
 
-    from .commands import do_verify
+    from .commands import Approvals, do_verify
+    approvals = Approvals(ctx.state)
     say("\n6. Anyone re-checks the receipt later.")
-    say("   > hermes necro verify")
-    say(_indent(do_verify(project)[0]))
+    say("   > /necro verify")
+    say(_indent(do_verify(project, approvals=approvals)[0]))
 
     say("\n7. Someone changes tipsplit.py after the receipt was written.")
     (project / "tipsplit.py").write_text(FIXED + "\n# a later edit\n")
-    say("   > hermes necro verify")
-    say(_indent(do_verify(project)[0]))
+    say("   > /necro verify")
+    say(_indent(do_verify(project, approvals=approvals)[0]))
 
     if not keep:
         shutil.rmtree(project, ignore_errors=True)

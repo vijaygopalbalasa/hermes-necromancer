@@ -39,7 +39,7 @@ def build_lock(root, now: str | None = None, files=None) -> dict:
             "patterns": list(c.files),
             "files": [{"path": f, "sha256": hash_file(root / f)} for f in frozen],
         })
-    return {
+    lk = {
         "kind": LOCK_KIND,
         "version": 1,
         "spec": {"path": SPEC_NAME, "sha256": hash_file(root / SPEC_NAME)},
@@ -47,6 +47,9 @@ def build_lock(root, now: str | None = None, files=None) -> dict:
         "sources": sp.sources,
         "frozenAt": now or utc_now(),
     }
+    if sp.outputs:
+        lk["outputs"] = list(sp.outputs)
+    return lk
 
 
 def freeze(root, now: str | None = None) -> dict:

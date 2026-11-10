@@ -3,7 +3,9 @@
 import importlib.util
 import json
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 
 from helpers import BUGGY, FIXED, HALF_FIX, REPO, Project
 
@@ -22,8 +24,11 @@ def load_plugin():
 
 
 class FakeState:
+    """Like Hermes's PluginState: get/set JSON values, with a path inside the plugin's data folder."""
+
     def __init__(self):
         self.data = {}
+        self.path = Path(tempfile.mkdtemp(prefix="necro-state-")) / "state.json"
 
     def get(self, key, default=None):
         return json.loads(json.dumps(self.data.get(key, default)))

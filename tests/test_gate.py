@@ -36,7 +36,7 @@ class Evaluate(unittest.TestCase):
     def test_an_unapproved_lock_is_refused_without_running_anything(self):
         with Project(code=FIXED) as p:
             lock.freeze(p.dir)
-            v = gate.evaluate(p.dir, budget_s=60, approved=set())
+            v = gate.evaluate(p.dir, budget_s=60, approved={})
             self.assertFalse(v.ok)
             self.assertEqual(v.results, [])
             self.assertTrue(any("not approved" in x for x in v.problems), v.problems)
@@ -44,7 +44,7 @@ class Evaluate(unittest.TestCase):
     def test_an_approved_lock_is_accepted(self):
         with Project(code=FIXED) as p:
             lk = lock.freeze(p.dir)
-            v = gate.evaluate(p.dir, budget_s=60, approved={lock.lock_hash(lk)})
+            v = gate.evaluate(p.dir, budget_s=60, approved={str(p.dir): lock.lock_hash(lk)})
             self.assertTrue(v.ok, v.problems)
 
     def test_an_edited_spec_is_refused_until_a_person_freezes_again(self):

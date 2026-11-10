@@ -83,7 +83,7 @@ class Verify(unittest.TestCase):
     def test_confirmed_when_nothing_changed(self):
         with Project(code=FIXED) as p:
             _, rc, path = passing_receipt(p)
-            v = verify.verify_receipt(path)
+            v = verify.verify_receipt(path, run=True)
             self.assertEqual(v.verdict, "CONFIRMED", v.message)
             self.assertIn(rc["receiptHash"], v.message)
 
@@ -133,7 +133,7 @@ class Verify(unittest.TestCase):
             )
             _, _, path = passing_receipt(p)
             p.write("flaky_input.txt", "changed outside the pinned sources")
-            v = verify.verify_receipt(path)
+            v = verify.verify_receipt(path, run=True)
             self.assertEqual(v.verdict, "MISMATCH")
             self.assertIn("C3", v.message)
 
@@ -148,7 +148,7 @@ class Verify(unittest.TestCase):
     def test_verify_works_from_another_working_directory(self):
         with Project(code=FIXED) as p, Project() as elsewhere:
             _, _, path = passing_receipt(p)
-            v = verify.verify_receipt(str(path), cwd=elsewhere.dir)
+            v = verify.verify_receipt(str(path), cwd=elsewhere.dir, run=True)
             self.assertEqual(v.verdict, "CONFIRMED", v.message)
 
     def test_a_receipt_for_failing_work_cannot_be_built(self):

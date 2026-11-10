@@ -155,18 +155,19 @@ class VerifyTrustsOnlyAConsistentLock(unittest.TestCase):
             path = p.write(".necro/receipts/x.json", json.dumps(rc))
             self.assertEqual(verify.verify_receipt(path).verdict, "MISMATCH")
 
-    def test_verify_is_stable_when_a_contract_writes_a_report_into_the_project(self):
+    def test_verify_is_stable_when_a_contract_writes_a_declared_report(self):
         with Project(code=FIXED) as p:
             p.write("contracts/test_refuses_zero.py",
                     "import time, unittest\nfrom tipsplit import split_bill\n"
                     "class T(unittest.TestCase):\n    def test_zero(self):\n"
                     "        open('junit-report.xml', 'w').write(str(time.time()))\n"
                     "        self.assertRaises(ValueError, split_bill, 1, 0)\n")
+            p.write("necro.toml", 'outputs = ["junit-report.xml"]\n' + p.read("necro.toml"))
             lock.freeze(p.dir)
             v = gate.evaluate(p.dir, budget_s=60)
             self.assertTrue(v.ok, v.problems)
-            self.assertEqual(verify.verify_receipt(v.receipt_path).verdict, "CONFIRMED")
-            self.assertEqual(verify.verify_receipt(v.receipt_path).verdict, "CONFIRMED")
+            self.assertEqual(verify.verify_receipt(v.receipt_path, run=True).verdict, "CONFIRMED")
+            self.assertEqual(verify.verify_receipt(v.receipt_path, run=True).verdict, "CONFIRMED")
 
 
 class NeverHangNeverCrash(unittest.TestCase):
@@ -239,7 +240,10 @@ class GuardPrecision(unittest.TestCase):
         self.assertIsNotNone(self.check("terminal", {"command": 'python3 ~/.hermes/plugins/contract-necromancer/necro "freeze"'}))
 
     def test_harmless_commands_are_not_blocked(self):
-        self.assertIsNone(self.check("terminal", {"command": "cat necro.toml && grep -rn 'def approve' ."}))
+        # Trade-off chosen in security round 2: any command where "necro" is followed by freeze, unfreeze or
+        # approve is blocked, even a harmless grep, so spliced person-only commands cannot slip through.
+        self.assertIsNotNone(self.check("terminal", {"command": "cat necro.toml && grep -rn 'def approve' ."}))
+        self.assertIsNone(self.check("terminal", {"command": "cat necro.toml && grep -rn 'def split_bill' ."}))
         self.assertIsNone(self.check("execute_code", {"code": "src = open('contracts/test_fair.py').read()\nopen('tipsplit.py', 'w').write('x')"}))
         self.assertIsNone(self.check("execute_code", {"code": "print(open('contracts/test_fair.py').read().replace('a', 'b'))"}))
 
@@ -311,8 +315,9 @@ class SecondRound(unittest.TestCase):
             self.assertIn("person", text)
             self.assertIsNone(lock.read_lock(p.dir))
 
-    def test_hermes_own_markers_do_not_refuse_a_person(self):
-        # Hermes sets AI_AGENT and HERMES_AGENT in every hermes process, including a person's `hermes necro freeze`.
+    def test_hermes_own_markers_refuse_the_shell_command(self):
+        # Security round 3: AI_AGENT or HERMES_AGENT refuses the shell command. Hermes sets both in every hermes
+        # process, so `hermes necro freeze` always refuses and /necro freeze inside Hermes is the way to freeze.
         from necro import commands
         with Project(code=FIXED) as p:
             os.environ["AI_AGENT"], os.environ["HERMES_AGENT"] = "hermes-agent", "true"
@@ -320,7 +325,8 @@ class SecondRound(unittest.TestCase):
                 text, code = commands.dispatch("freeze", p.dir, commands.Approvals(None), from_shell=True)
             finally:
                 del os.environ["AI_AGENT"], os.environ["HERMES_AGENT"]
-            self.assertEqual(code, 0, text)
+            self.assertEqual(code, 3, text)
+            self.assertIn("/necro freeze", text)
 
     def test_the_marker_is_registered_for_the_agent_shell(self):
         with Project() as p:

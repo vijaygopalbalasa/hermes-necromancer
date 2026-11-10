@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
+import re
+import secrets
 import shlex
+import subprocess
+import sys
 from pathlib import Path
 
 from .canon import utc_now
-from .gate import evaluate
+from .gate import APPROVAL_TAMPERED, evaluate
 from .lock import LOCK_REL, LockError, drift, find_root, freeze, lock_hash, lock_path, read_lock
 from .receipts import list_receipts
 from .spec import SPEC_NAME, SpecError, load_spec
@@ -19,50 +25,101 @@ PERSON_CHECK_BUDGET = 900.0
 USAGE = """Contract Necromancer: Hermes cannot call coding work done while a frozen acceptance contract fails.
 
   status            what is frozen here, and the latest receipt
-  freeze            a person freezes the contracts in necro.toml (by hash)
+  freeze            a person freezes the contracts in necro.toml (by hash); best typed as /necro freeze
   approve           accept a lock someone else froze and committed, after reading it
   unfreeze          remove the lock so contracts can be edited (receipts stay)
   check             run every frozen contract now; write a receipt if all pass
-  verify [receipt]  re-check a receipt (default: the newest): CONFIRMED, MISMATCH or SUPERSEDED
+  verify [receipt]  re-check a receipt (default: the newest): CONFIRMED, MISMATCH or SUPERSEDED;
+                    a lock nobody approved here is checked by hash only, unless you add --run
   receipts          list receipts, newest first
   demo              run the built-in story: planted bug, refusal, fix, receipt"""
 
 
 class Approvals:
-    """For each project folder, the one lock hash a person accepted there (by freezing it or with
-    /necro approve). Kept in Hermes's per-plugin state, outside the project. Freezing again replaces
-    the folder's approval, so rolling back to an older lock is refused; unfreezing removes it."""
+    """For each project folder, the one lock hash a person accepted there (by /necro freeze or
+    /necro approve), in Hermes's per-plugin state outside the project. Freezing again replaces the
+    folder's approval, so rolling back to an older lock is refused; unfreezing removes it.
+
+    Each record carries an HMAC made with a key kept in a file beside the store, so a record written
+    or edited without necro (by hand, or by an agent's shell) fails its check and the folder is
+    refused. A process running as the same user can read that key: this detects ordinary tampering;
+    it does not stop a determined process."""
 
     KEY = "approved_roots"
     LIMIT = 500
 
     def __init__(self, store=None):
         self.store = store
+        self.known: set = set()  # folders seen approved in this process, kept even if the store loses them
+        try:
+            self.key_path = Path(store.path).parent / "approvals.key" if store is not None else None
+        except Exception:
+            self.key_path = None
+        self._memory_key = None
 
     def _data(self) -> dict:
         data = self.store.get(self.KEY, {}) if self.store is not None else {}
         return data if isinstance(data, dict) else {}
 
+    def _key(self, create: bool = False):
+        if self.key_path is None:
+            if self._memory_key is None and create:
+                self._memory_key = secrets.token_bytes(32)
+            return self._memory_key
+        try:
+            return bytes.fromhex(self.key_path.read_text().strip())
+        except (OSError, ValueError):
+            if not create:
+                return None
+        self.key_path.parent.mkdir(parents=True, exist_ok=True)
+        key = secrets.token_bytes(32)
+        try:
+            fd = os.open(self.key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            return self._key(create=False)
+        with os.fdopen(fd, "w") as handle:
+            handle.write(key.hex())
+        return key
+
+    @staticmethod
+    def _mac(key: bytes, root: str, digest: str, at: str) -> str:
+        return hmac.new(key, f"{root}\n{digest}\n{at}".encode(), hashlib.sha256).hexdigest()
+
     def mapping(self):
-        """{folder: lock hash}, or None when there is no state store (standalone use: no check)."""
+        """{folder: lock hash, or gate.APPROVAL_TAMPERED when its record fails the check}, or None
+        when there is no state store (standalone use: no approvals at all)."""
         if self.store is None:
             return None
-        return {root: entry.get("lock") for root, entry in self._data().items() if isinstance(entry, dict)}
+        key = self._key()
+        out = {}
+        for root, entry in self._data().items():
+            good = (isinstance(entry, dict) and key is not None and isinstance(entry.get("mac"), str)
+                    and hmac.compare_digest(entry["mac"], self._mac(key, root, str(entry.get("lock")),
+                                                                     str(entry.get("at")))))
+            out[root] = entry.get("lock") if good else APPROVAL_TAMPERED
+            self.known.add(root)
+        return out
 
     def approve(self, root: Path, digest: str) -> None:
         if self.store is None:
             return
+        root_s = str(Path(root).resolve())
+        key = self._key(create=True)
+        at = utc_now()
         data = self._data()
-        data[str(Path(root).resolve())] = {"lock": digest, "at": utc_now()}
+        data[root_s] = {"lock": digest, "at": at, "mac": self._mac(key, root_s, digest, at)}
         if len(data) > self.LIMIT:
-            data = dict(sorted(data.items(), key=lambda kv: kv[1].get("at", ""))[-self.LIMIT:])
+            data = dict(sorted(data.items(), key=lambda kv: str(kv[1].get("at", "")))[-self.LIMIT:])
         self.store.set(self.KEY, data)
+        self.known.add(root_s)
 
     def revoke(self, root: Path) -> None:
+        root_s = str(Path(root).resolve())
+        self.known.discard(root_s)
         if self.store is None:
             return
         data = self._data()
-        data.pop(str(Path(root).resolve()), None)
+        data.pop(root_s, None)
         self.store.set(self.KEY, data)
 
     def approved_here(self, root: Path, digest: str) -> bool:
@@ -191,7 +248,7 @@ def do_check(cwd, approvals: Approvals, cache=None, budget_s: float = PERSON_CHE
     return "\n".join(lines), 0 if v.ok else 2
 
 
-def do_verify(cwd, receipt: str | None = None) -> tuple:
+def do_verify(cwd, receipt: str | None = None, approvals: Approvals | None = None, run: bool = False) -> tuple:
     if receipt:
         target = receipt
     else:
@@ -200,7 +257,7 @@ def do_verify(cwd, receipt: str | None = None) -> tuple:
         if not latest:
             return "No receipt to verify here.", 1
         target = str(latest[0])
-    v = verify_receipt(target, cwd=str(cwd))
+    v = verify_receipt(target, cwd=str(cwd), approved=approvals.mapping() if approvals else None, run=run)
     return v.message, 0 if v.ok else 1
 
 
@@ -220,28 +277,76 @@ def do_receipts(cwd) -> tuple:
 
 
 PERSON_ONLY = {"freeze", "unfreeze", "approve"}
-
-
 AGENT_MARKER = "NECRO_AGENT_SESSION"
+_AUTO = object()
+_HERMES_PROCESS = re.compile(r"(?:^|[\s/])hermes(?:\s|$)|hermes_cli|hermes-agent|hermes_bootstrap", re.IGNORECASE)
+
+
+def hermes_ancestors(limit: int = 40):
+    """The command lines of this process's ancestors (parent first), or None when they cannot be read."""
+    pid, chain = os.getppid(), []
+    for _ in range(limit):
+        if pid <= 1:
+            return chain
+        try:
+            out = subprocess.run(["ps", "-o", "ppid=", "-o", "command=", "-p", str(pid)], capture_output=True,
+                                 text=True, timeout=5, stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        parts = out.stdout.strip().split(None, 1)
+        if out.returncode != 0 or not parts:
+            return chain or None
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            return None
+        chain.append(parts[1] if len(parts) > 1 else "")
+    return chain
+
+
+def person_problem(verb: str, *, session_env_ok: bool = True, environ=None, stdin_isatty=None, ancestors=_AUTO):
+    """Why `necro <verb>` from a shell might not be a person typing it, or None. Fails closed: any
+    doubt refuses. The primary route is /necro <verb> inside Hermes, which an agent cannot type."""
+    env = os.environ if environ is None else environ
+    use_slash = f"Type /necro {verb} in Hermes instead."
+    if not session_env_ok:
+        return ("this Hermes cannot mark its agent's shell (ctx.register_session_env arrived in Hermes 0.23.1), so "
+                f"the command cannot tell you from the agent. {use_slash}")
+    if env.get(AGENT_MARKER):
+        return f"this shell belongs to a Hermes agent ({AGENT_MARKER} is set). {use_slash}"
+    marker = next((name for name in ("AI_AGENT", "HERMES_AGENT") if env.get(name)), None)
+    if marker:
+        return (f"{marker} is set, so this may be an AI agent's shell (Hermes sets it in every hermes command). "
+                f"{use_slash} Or run python3 <plugin folder>/necro {verb} in your own terminal.")
+    if not (sys.stdin.isatty() if stdin_isatty is None else stdin_isatty):
+        return f"stdin is not a terminal, so no person is typing this. {use_slash}"
+    chain = hermes_ancestors() if ancestors is _AUTO else ancestors
+    if chain is None:
+        return f"the programs that started this shell cannot be checked. {use_slash}"
+    if any(_HERMES_PROCESS.search(cmd or "") for cmd in chain):
+        return f"a Hermes process started this shell, so it may be the agent's. {use_slash}"
+    return None
 
 
 def in_agent_shell() -> bool:
-    """The plugin gives every command a Hermes agent runs NECRO_AGENT_SESSION (through
-    ctx.register_session_env). A person's own terminal does not have it. (Hermes's own
-    AI_AGENT and HERMES_AGENT cannot tell the two apart: Hermes sets them in every process.)"""
     return bool(os.environ.get(AGENT_MARKER))
 
 
-def dispatch(raw: str, cwd, approvals: Approvals, cache=None, from_shell: bool = False) -> tuple:
+def dispatch(raw: str, cwd, approvals: Approvals, cache=None, from_shell: bool = False,
+             session_env_ok: bool = True) -> tuple:
+    """Run one person-facing command. ``from_shell`` is True for `hermes necro` and `python3 necro`;
+    their freeze, unfreeze and approve then refuse unless a person is clearly typing them. The /necro
+    slash command (from_shell False) comes from the person's own chat input, which an agent cannot type."""
     try:
         words = shlex.split(raw or "")
     except ValueError:
         words = (raw or "").split()
     sub = words[0].lower() if words else "status"
     rest = words[1:]
-    if from_shell and sub in PERSON_ONLY and in_agent_shell():
-        return (f"Refused: `necro {sub}` is a person's command and this shell belongs to a Hermes agent "
-                f"({AGENT_MARKER} is set). Run it in your own terminal, or type /necro {sub} in Hermes."), 3
+    if from_shell and sub in PERSON_ONLY:
+        problem = person_problem(sub, session_env_ok=session_env_ok)
+        if problem:
+            return f"Refused: `necro {sub}` is a person's command, and {problem}", 3
     if sub in ("status", "show"):
         return status(cwd, approvals)
     if sub == "freeze":
@@ -253,7 +358,9 @@ def dispatch(raw: str, cwd, approvals: Approvals, cache=None, from_shell: bool =
     if sub == "check":
         return do_check(cwd, approvals, cache)
     if sub == "verify":
-        return do_verify(cwd, rest[0] if rest else None)
+        run = "--run" in rest
+        rest = [w for w in rest if w != "--run"]
+        return do_verify(cwd, rest[0] if rest else None, approvals, run=run)
     if sub == "receipts":
         return do_receipts(cwd)
     if sub == "demo":

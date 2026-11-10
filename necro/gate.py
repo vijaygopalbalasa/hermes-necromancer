@@ -55,6 +55,9 @@ class Verdict:
         }
 
 
+APPROVAL_TAMPERED = "!tampered"
+TAMPERED_PROBLEM = ("approvals were changed outside necro: the record for this folder failed its check (or the key "
+                    "beside it is gone). A person freezes again with /necro freeze")
 BUDGET_PROBLEM = ("reading the project's files took longer than the time budget. A person can list the files "
                   "that matter under sources = [...] in necro.toml and freeze again")
 POST_RUN_GRACE_S = 3.0
@@ -74,19 +77,27 @@ def snapshot(root: Path, lk: dict, files: list, deadline=None) -> tuple:
     return snap, sources
 
 
-def _digest(lh: str, snap: dict, ignore=()) -> str:
-    return sha256_text(canonical_json({"lock": lh, "files": {p: h for p, h in snap.items() if p not in ignore}}))
+def _digest(lh: str, snap: dict) -> str:
+    return sha256_text(canonical_json({"lock": lh, "files": snap}))
 
 
-def _approved(approved, root: Path, lh: str) -> bool:
+def _approval_problem(approved, root: Path, lh: str) -> str | None:
+    """None when a person accepted this exact lock for this exact folder. ``approved`` maps a folder
+    to its lock hash (APPROVAL_TAMPERED when its record failed the MAC); None skips the check."""
     if approved is None:
-        return True
-    if isinstance(approved, dict):
-        return approved.get(str(root)) == lh
-    return lh in approved
+        return None
+    if not isinstance(approved, dict):
+        raise TypeError("approved must map a project folder to the lock hash a person accepted there")
+    got = approved.get(str(root))
+    if got == APPROVAL_TAMPERED:
+        return TAMPERED_PROBLEM
+    if got != lh:
+        return (f"the lock {LOCK_REL} ({lh[:12]}) is not approved for this folder. A person freezes contracts with "
+                "/necro freeze, or accepts a committed lock after reading it with /necro approve")
+    return None
 
 
-def fingerprint(root, deadline=None, ignore=()) -> str | None:
+def fingerprint(root, deadline=None) -> str | None:
     """The same digest a verdict records, without running anything: None when there is no usable
     lock. Raises BudgetExceeded when reading the files outruns the deadline."""
     root = Path(root).resolve()
@@ -98,7 +109,7 @@ def fingerprint(root, deadline=None, ignore=()) -> str | None:
         return None
     files = walk_files(root, deadline)
     snap, _ = snapshot(root, lk, files, deadline)
-    return _digest(lock_hash(lk), snap, ignore)
+    return _digest(lock_hash(lk), snap)
 
 
 def evaluate(root, *, budget_s: float | None = None, deadline: float | None = None, approved=None,
@@ -119,11 +130,9 @@ def evaluate(root, *, budget_s: float | None = None, deadline: float | None = No
     except LockError as exc:
         return Verdict(False, root, problems=[f"the lock cannot be used: {exc}"])
     lh = lock_hash(lk)
-    if not _approved(approved, root, lh):
-        return Verdict(False, root, lh, problems=[
-            f"the lock {LOCK_REL} ({lh[:12]}) is not approved for this folder. A person freezes contracts with "
-            "/necro freeze, or accepts a committed lock after reading it with /necro approve"
-        ])
+    refused = _approval_problem(approved, root, lh)
+    if refused:
+        return Verdict(False, root, lh, problems=[refused])
     try:
         files = walk_files(root, deadline)
         d = drift(root, lk, files=files, deadline=deadline)
@@ -134,30 +143,30 @@ def evaluate(root, *, budget_s: float | None = None, deadline: float | None = No
         before, _ = snapshot(root, lk, files, deadline)
         key = str(root)
         hit = cache.get(key) if cache is not None else None
-        if hit and hit["lock"] == lh and _digest(lh, before, hit["outputs"]) == hit["digest"]:
-            results, outputs, after, cached = hit["results"], hit["outputs"], before, True
-            sources = [p for p in source_files(root, lk, files=files)]
+        if hit and hit["lock"] == lh and _digest(lh, before) == hit["digest"]:
+            results, after, cached = hit["results"], before, True
+            sources = source_files(root, lk, files=files)
         else:
             cached = False
             results = run_contracts(root, lk, deadline=deadline, drift_result=d)
             grace = None if deadline is None else max(deadline, time.monotonic()) + POST_RUN_GRACE_S
-            after_files = walk_files(root, grace)
-            after, sources = snapshot(root, lk, after_files, grace)
-            frozen = set(frozen_paths(lk))
-            outputs = sorted(p for p in set(before) | set(after)
-                             if before.get(p) != after.get(p) and p not in frozen)
-            if cache is not None and not any(r.status in ("skipped", "unfinished") for r in results):
-                cache[key] = {"lock": lh, "digest": _digest(lh, after, outputs), "results": results,
-                              "outputs": outputs}
+            after, sources = snapshot(root, lk, walk_files(root, grace), grace)
+            changed = sorted(p for p in set(before) | set(after) if before.get(p) != after.get(p))
+            if changed:
+                shown = ", ".join(changed[:10]) + (" and more" if len(changed) > 10 else "")
+                problems.append(f"the contract run changed {shown}. Code under test must not change project files; "
+                                "a person can declare files the contracts write under outputs = [...] in necro.toml")
+            elif cache is not None and not any(r.status in ("skipped", "unfinished") for r in results):
+                cache[key] = {"lock": lh, "digest": _digest(lh, after), "results": results}
     except BudgetExceeded:
         return Verdict(False, root, lh, problems=[BUDGET_PROBLEM])
     except (SourcesError, SpecError) as exc:
         return Verdict(False, root, lh, problems=[str(exc)])
     ok = not problems and all_pass(results)
-    v = Verdict(ok, root, lh, results, problems, cached=cached, digest=_digest(lh, after, outputs))
+    v = Verdict(ok, root, lh, results, problems, cached=cached, digest=_digest(lh, after))
     if ok:
-        pins = [{"path": p, "sha256": after.get(p)} for p in sources if p not in outputs]
-        receipt = build_receipt(root, lk, results, trigger=trigger, pins=pins, outputs=outputs)
+        pins = [{"path": p, "sha256": after.get(p)} for p in sources]
+        receipt = build_receipt(root, lk, results, trigger=trigger, pins=pins)
         v.receipt_path = write_receipt(root, receipt)
         v.receipt_hash = receipt["receiptHash"]
     return v

@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shlex
 import threading
 import time
 from pathlib import Path
@@ -51,7 +52,8 @@ class NecroPlugin:
         self.ctx = ctx
         self.cache: dict = {}
         self.turns: dict = {}   # session id -> project folders the gate checked this turn
-        self.seen: dict = {}    # project folder -> (digest, outputs) at its last check
+        self.seen: dict = {}    # project folder -> digest at its last check
+        self.session_env_ok = False  # set by register() when the agent-shell marker could be registered
         self._mutex = threading.Lock()
         self._run_locks: dict = {}
         try:
@@ -100,9 +102,8 @@ class NecroPlugin:
                               trigger=trigger)
         finally:
             run_lock.release()
-        hit = self.cache.get(str(root))
         if v.digest:
-            self.seen[str(root)] = (v.digest, tuple(hit["outputs"]) if hit else ())
+            self.seen[str(root)] = v.digest
         return v
 
     def _deadline(self, key: str, default: float) -> float:
@@ -122,8 +123,9 @@ class NecroPlugin:
         return roots
 
     def _orphans(self, paths=()) -> list:
-        """Folders a person froze (and never unfroze) whose lock is gone, around these paths."""
-        approved = self.approvals.mapping() or {}
+        """Folders a person froze (and never unfroze) whose lock is gone, around these paths. Uses the
+        approval store and, in case that was emptied too, the folders seen approved in this process."""
+        approved = set(self.approvals.mapping() or {}) | set(self.approvals.known)
         out = []
         for raw in list(paths or []) + [self.cwd()]:
             try:
@@ -153,7 +155,7 @@ class NecroPlugin:
             if root is not None and str(root) not in self.seen:
                 digest = gate.fingerprint(root, self._deadline("gate_budget_seconds", GATE_BUDGET_S))
                 if digest is not None:
-                    self.seen[str(root)] = (digest, ())
+                    self.seen[str(root)] = digest
         except Exception:
             logger.debug("contract-necromancer: no baseline this turn", exc_info=True)
         return None
@@ -224,14 +226,14 @@ class NecroPlugin:
         baseline, so a reply in a project nobody touched stays unstamped."""
         last = self.seen.get(str(root))
         try:
-            now = gate.fingerprint(root, deadline, ignore=last[1] if last else ())
+            now = gate.fingerprint(root, deadline)
         except Exception:
             return True
         if last is None:
             if now is not None:
-                self.seen[str(root)] = (now, ())
+                self.seen[str(root)] = now
             return False
-        return now != last[0]
+        return now != last
 
     def on_pre_tool_call(self, tool_name="", args=None, **kwargs):
         """Block the agent's ordinary routes to rewriting a frozen contract, the lock or the approvals."""
@@ -293,11 +295,16 @@ class NecroPlugin:
                             choices=["status", "freeze", "approve", "unfreeze", "check", "verify", "receipts", "demo", "help"])
         parser.add_argument("receipt", nargs="?", help="receipt file for verify (default: the newest)")
         parser.add_argument("--dir", default=None, help="project folder (default: the current folder)")
+        parser.add_argument("--run", action="store_true",
+                            help="verify: re-run the contracts even though this lock is not approved here")
 
     def cli_run(self, args) -> int:
         cwd = args.dir or os.getcwd()
-        raw = args.action + (f" {args.receipt}" if getattr(args, "receipt", None) else "")
-        text, code = commands.dispatch(raw, cwd, self.approvals, self.cache, from_shell=True)
+        words = [args.action] + ([args.receipt] if getattr(args, "receipt", None) else [])
+        if getattr(args, "run", False):
+            words.append("--run")
+        text, code = commands.dispatch(shlex.join(words), cwd, self.approvals, self.cache, from_shell=True,
+                                       session_env_ok=self.session_env_ok)
         print(text)
         return code
 
@@ -314,8 +321,13 @@ def register(ctx):
     ctx.register_hook("pre_llm_call", plugin.on_pre_llm_call)
     try:  # mark the agent's own commands, so person-only `necro freeze/approve/unfreeze` refuse to run there
         ctx.register_session_env([commands.AGENT_MARKER], lambda session_id: {commands.AGENT_MARKER: session_id or "1"})
+        plugin.session_env_ok = True
     except Exception:
-        logger.debug("contract-necromancer: register_session_env unavailable", exc_info=True)
+        # Not just a log line: without the marker the shell commands freeze, approve and unfreeze refuse
+        # to run at all (see commands.person_problem); /necro inside Hermes still works.
+        plugin.session_env_ok = False
+        logger.warning("contract-necromancer: register_session_env is unavailable (Hermes before 0.23.1); "
+                       "`hermes necro freeze/approve/unfreeze` will refuse, use /necro instead")
     ctx.register_command("necro", plugin.slash, description="Frozen acceptance contracts: status, freeze, check, verify",
                          args_hint="[status|freeze|approve|unfreeze|check|verify|receipts|demo]")
     ctx.register_cli_command(name="necro", help="Frozen acceptance contracts and receipts (Contract Necromancer)",

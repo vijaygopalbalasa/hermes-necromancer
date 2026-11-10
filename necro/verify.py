@@ -48,9 +48,13 @@ def _well_formed(rc) -> bool:
     return isinstance(rc.get("outputs", []), list)
 
 
-def verify_receipt(receipt_file, cwd=None, budget_s: float | None = None) -> VerifyResult:
-    """Check the receipt's own hash, re-hash every file it pins, look for files added since,
-    then re-run the frozen contracts and compare each result with the one recorded."""
+def verify_receipt(receipt_file, cwd=None, budget_s: float | None = None, approved=None,
+                   run: bool = False) -> VerifyResult:
+    """Check the receipt's own hash, re-hash every file it pins and look for files added since.
+    Then, only when a person approved this lock for this folder (``approved`` maps folder to lock
+    hash) or asked for it with ``run``, re-run the frozen contracts and compare each result with the
+    one recorded. Without either, the commands of a project nobody here approved are never run: the
+    answer is HASHES MATCH, which is not a confirmation."""
     path = Path(receipt_file).expanduser()
     if not path.is_absolute():
         path = Path(cwd or os.getcwd()) / path
@@ -98,12 +102,11 @@ def verify_receipt(receipt_file, cwd=None, budget_s: float | None = None) -> Ver
             if hash_file(root / f["path"]) != f.get("sha256"):
                 changed.add(f["path"])
     pinned = {s["path"]: s.get("sha256") for s in rc.get("sources", [])}
-    outputs = set(rc.get("outputs") or [])
     for rel, digest in pinned.items():
         if hash_file(root / rel) != digest:
             changed.add(rel)
     try:
-        added = sorted(set(source_files(root, lk)) - set(pinned) - outputs)
+        added = sorted(set(source_files(root, lk)) - set(pinned))
     except SourcesError as exc:
         return _mismatch(str(exc))
     if changed or added:
@@ -114,8 +117,27 @@ def verify_receipt(receipt_file, cwd=None, budget_s: float | None = None) -> Ver
             parts.append(f"Files added: {', '.join(added)}.")
         return _mismatch(" ".join(parts), sorted(changed) + added)
 
+    trusted = run or (isinstance(approved, dict) and approved.get(str(root)) == lock_hash(lk))
+    if not trusted:
+        return VerifyResult(
+            "HASHES MATCH",
+            f"HASHES MATCH {rc['receiptHash']}. Every file is as the receipt says, but the contracts were not re-run, "
+            "because this project's lock is not approved here. Read necro.toml, then run `necro verify --run` to "
+            "re-run them.",
+        )
+
     recorded = {c["id"]: c.get("result") for c in rc["contracts"]}
     fresh = {r.id: r for r in run_contracts(root, lk, budget_s=budget_s)}
+    touched = sorted(rel for rel, digest in pinned.items() if hash_file(root / rel) != digest)
+    touched += sorted(f["path"] for c in rc["contracts"] for f in c.get("files", [])
+                      if hash_file(root / f["path"]) != f.get("sha256"))
+    try:
+        created = sorted(set(source_files(root, lk)) - set(pinned))
+    except SourcesError as exc:
+        return _mismatch(str(exc))
+    if touched or created:
+        return _mismatch(f"The contract run changed {', '.join(sorted(set(touched + created)))}; code under test must "
+                         "not change project files (a person can declare outputs in necro.toml).", touched + created)
     differ = []
     for cid in sorted(set(recorded) | set(fresh)):
         now = fresh[cid].status if cid in fresh else "missing"

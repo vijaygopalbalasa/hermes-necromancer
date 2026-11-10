@@ -8,6 +8,7 @@ arbiter either way. Paths compare without regard to case, because macOS and Wind
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import re
 import shlex
@@ -24,8 +25,13 @@ SEGMENT_SPLIT = re.compile(r"\|\||&&|[;|\n]")
 REDIRECT = re.compile(r"(?<![<>&0-9])(?:\d|&)?>>?\|?\s*([^\s;|&<>]+)")
 WRITE_COMMANDS = {
     "rm", "mv", "tee", "truncate", "chmod", "chown", "ln", "unlink", "dd", "touch", "shred", "patch",
-    "rmdir", "ed", "ex", "vi", "vim", "nvim", "nano", "emacs",
+    "rmdir", "ed", "ex", "vi", "vim", "nvim", "nano", "emacs", "trash", "srm",
 }
+# Detaching or scrubbing the environment next to a necro command is how a person-only command would be
+# smuggled past the agent-shell marker, so it is refused outright.
+EVASION = re.compile(
+    r"\benv\s+(?:-[a-z]*[iu]\b|--ignore-environment|--unset)|\bunset\b|\bsetsid\b|\bnohup\b|\bdisown\b|"
+    r"\(\s*[^()]*&\s*\)|\bdaemon(?:ize)?\b|\bstart-stop-daemon\b|\bsystemd-run\b|\blaunchctl\b|\bat\s+now\b")
 LAST_ARG_COMMANDS = {"cp", "install", "rsync", "scp"}
 GIT_WRITES = {"rm", "mv"}
 MAX_TEXT = 500_000
@@ -52,8 +58,12 @@ def _lock_for(root: Path):
     return lk
 
 
+def _expand(text: str) -> str:
+    return os.path.expandvars(os.path.expanduser(str(text).strip()))
+
+
 def _resolve(path_str: str, cwd: str) -> Path:
-    p = Path(os.path.expanduser(str(path_str).strip()))
+    p = Path(_expand(path_str))
     if not p.is_absolute():
         p = Path(cwd or os.getcwd()) / p
     return Path(os.path.realpath(p))
@@ -89,6 +99,10 @@ def _block(rel: str) -> str:
             "wrong, say so and ask the person to change it and run /necro freeze again.")
 
 
+TOO_LONG_BLOCK = ("Blocked by Contract Necromancer: this command is too long to check and it mentions necro or a frozen "
+                  "file. Split it into shorter commands.")
+EVASION_BLOCK = ("Blocked by Contract Necromancer: detaching a process or changing its environment next to a necro "
+                 "command is not allowed from the agent's shell.")
 STORE_BLOCK = ("Blocked by Contract Necromancer: that is where a person's approvals of frozen contracts are kept. "
                "Only a person changes them, with /necro freeze, /necro approve or /necro unfreeze.")
 PERSON_BLOCK = ("Blocked by Contract Necromancer: freezing, unfreezing or approving contracts is a person's job, so it "
@@ -98,9 +112,47 @@ PERSON_BLOCK = ("Blocked by Contract Necromancer: freezing, unfreezing or approv
 def _in_store(p: Path, store_dir: str | None) -> bool:
     if not store_dir:
         return False
-    store = os.path.realpath(store_dir).lower().rstrip("/")
     low = str(p).lower()
-    return low == store or low.startswith(store + "/")
+    for store in {os.path.realpath(store_dir).lower().rstrip("/"), str(store_dir).lower().rstrip("/")}:
+        if low == store or low.startswith(store + "/"):
+            return True
+    return False
+
+
+def _store_needles(store_dir: str | None) -> set:
+    """Spellings of the approval store's folder that a command or a snippet of code could use."""
+    if not store_dir:
+        return set()
+    out = set()
+    home = os.path.realpath(os.path.expanduser("~"))
+    for base in {os.path.realpath(store_dir), str(store_dir)}:
+        out.add(base.lower())
+        if base.startswith(home + "/"):
+            tail = base[len(home) + 1:]
+            out |= {f"~/{tail}".lower(), f"$home/{tail}".lower(), f"${{home}}/{tail}".lower()}
+    hermes_home = os.environ.get("HERMES_HOME")
+    if hermes_home:
+        for base in {os.path.realpath(store_dir), str(store_dir)}:
+            hh = os.path.realpath(hermes_home)
+            if base.startswith(hh + "/"):
+                tail = base[len(hh) + 1:]
+                out |= {f"$hermes_home/{tail}".lower(), f"${{hermes_home}}/{tail}".lower()}
+    return out
+
+
+def _touches_store(text_low: str, words: list, wd: str, store_dir: str | None) -> bool:
+    if not store_dir:
+        return False
+    if any(n in text_low for n in _store_needles(store_dir)):
+        return True
+    for token in words:
+        if "/" in token or token.startswith(("~", ".", "$")):
+            try:
+                if _in_store(_resolve(token, wd), store_dir):
+                    return True
+            except (OSError, ValueError):
+                continue
+    return False
 
 
 def _frozen_target(path_str: str, cwd: str, store_dir: str | None = None) -> str | None:
@@ -159,6 +211,12 @@ def _words(text: str) -> list:
         return text.split()
 
 
+def _person_only_text(low: str) -> bool:
+    """The raw-text check: "necro" followed anywhere later by freeze, unfreeze or approve. Linear."""
+    at = low.find("necro")
+    return at >= 0 and ("freeze" in low[at:] or "approve" in low[at:])
+
+
 def _person_only(words: list) -> bool:
     """True when the words run necro's freeze, unfreeze or approve (quotes already removed)."""
     for i, word in enumerate(words[:-1]):
@@ -181,6 +239,34 @@ def _command_name(words: list) -> tuple:
     return os.path.basename(words[i]), words[i + 1:]
 
 
+FIND_ACTIONS = {"-delete", "-exec", "-execdir", "-ok", "-okdir"}
+
+
+def _find_hits_frozen(args: list, root: Path, lk: dict, wd: str) -> str | None:
+    """For `find <dirs> ... -delete|-exec ...`: the first frozen path (or .necro) that it would reach,
+    judged by its start folders and its -name / -iname filters."""
+    if not any(a in FIND_ACTIONS for a in args):
+        return None
+    starts = []
+    for a in args:
+        if a.startswith(("-", "(", "!")):
+            break
+        starts.append(a)
+    names = [args[i + 1] for i, a in enumerate(args[:-1]) if a in ("-name", "-iname")]
+    targets = sorted(frozen_paths(lk)) + [LOCK_REL]
+    for start in starts or ["."]:
+        base = _rel(root, _resolve(start, wd))
+        if base is None:
+            continue
+        prefix = "" if base in ("", ".") else base.rstrip("/") + "/"
+        for rel in targets:
+            if prefix and not (rel.lower().startswith(prefix.lower()) or rel.lower() == base.lower()):
+                continue
+            if not names or any(fnmatch.fnmatch(rel.rsplit("/", 1)[-1].lower(), n.lower()) for n in names):
+                return rel
+    return None
+
+
 def _code_writes(low_text: str, spellings: set) -> bool:
     """True when code (Python or JavaScript) writes, deletes or moves one of these exact paths."""
     for s in spellings:
@@ -198,17 +284,25 @@ def _code_writes(low_text: str, spellings: set) -> bool:
 
 
 def _shell_block(cmd: str, wd: str, store_dir: str | None) -> str | None:
-    cmd = cmd[:MAX_TEXT]
+    full_low = cmd.lower()
+    if len(cmd) > MAX_TEXT:
+        root = find_root(wd) if wd else None
+        lk = _lock_for(root) if root else None
+        frozen = [rel for rel in (frozen_paths(lk) if lk else ()) if rel.lower() in full_low]
+        if "necro" in full_low or frozen or any(n in full_low for n in _store_needles(store_dir)):
+            return TOO_LONG_BLOCK
+        cmd = cmd[:MAX_TEXT]
     words = _words(cmd)
     low = cmd.lower()
-    if _person_only(words) or "necro_agent_session" in low or "necro_agent_session" in " ".join(words).lower():
+    joined = " ".join(words).lower()
+    if (_person_only(words) or _person_only_text(low) or _person_only_text(joined)
+            or "necro_agent_session" in low or "necro_agent_session" in joined):
         return PERSON_BLOCK
-    if store_dir and os.path.realpath(store_dir).lower() in low:
-        for segment in SEGMENT_SPLIT.split(cmd):
-            name, _ = _command_name(_words(segment))
-            if name in WRITE_COMMANDS or name in LAST_ARG_COMMANDS or ">" in segment:
-                return STORE_BLOCK
-    low = low + "\n" + " ".join(words).lower()  # also the words with quotes removed: .ne''cro is .necro
+    if ("necro" in low or "necro" in joined) and (EVASION.search(low) or EVASION.search(joined)):
+        return EVASION_BLOCK
+    if _touches_store(low + "\n" + joined, words, wd, store_dir):
+        return STORE_BLOCK
+    low = low + "\n" + joined  # also the words with quotes removed: .ne''cro is .necro
     roots = []
     root = find_root(wd) if wd else None
     if root:
@@ -220,7 +314,15 @@ def _shell_block(cmd: str, wd: str, store_dir: str | None) -> str | None:
                 roots.append(r)
     for root in roots:
         lk = _lock_for(root)
-        if not lk or not _mentions(low, root, lk, wd):
+        if not lk:
+            continue
+        for segment in SEGMENT_SPLIT.split(cmd):
+            name, rest = _command_name(_words(segment))
+            if name == "find":
+                hit = _find_hits_frozen(rest, root, lk, wd)
+                if hit:
+                    return _block(hit)
+        if not _mentions(low, root, lk, wd):
             continue
         for m in REDIRECT.finditer(cmd):
             target = m.group(1)
@@ -230,10 +332,10 @@ def _shell_block(cmd: str, wd: str, store_dir: str | None) -> str | None:
             if rel is not None and _is_frozen(rel, lk):
                 return _block(rel)
         for segment in SEGMENT_SPLIT.split(cmd):
+            name, rest = _command_name(_words(segment))
             named = _mentions(segment.lower() + "\n" + " ".join(_words(segment)).lower(), root, lk, wd)
             if not named:
                 continue
-            name, rest = _command_name(_words(segment))
             args = [a for a in rest if not a.startswith("-")]
             if name in WRITE_COMMANDS:
                 return _block(named[0])
@@ -252,10 +354,15 @@ def _shell_block(cmd: str, wd: str, store_dir: str | None) -> str | None:
 
 
 def _code_block(code: str, cwd: str, store_dir: str | None) -> str | None:
-    code = code[:MAX_TEXT]
     low = code.lower()
-    if store_dir and os.path.realpath(store_dir).lower() in low:
+    if any(n in low for n in _store_needles(store_dir)):
         return STORE_BLOCK
+    if len(code) > MAX_TEXT:
+        if "necro" in low:
+            return TOO_LONG_BLOCK
+        code, low = code[:MAX_TEXT], low[:MAX_TEXT]
+    if _person_only_text(low):
+        return PERSON_BLOCK
     root = find_root(cwd) if cwd else None
     if root is None:
         return None

@@ -1,7 +1,10 @@
-"""Standalone use without Hermes, for CI or a reviewer: python3 <plugin folder>/necro verify <receipt>.
+"""Standalone use without Hermes, for CI or a reviewer: python3 <plugin folder>/necro verify <receipt> --run.
 
-Freezing here records no Hermes approval; inside Hermes run /necro approve once after reading the lock."""
+There are no approvals here, so verify re-runs contracts only with --run (after you read necro.toml).
+freeze, approve and unfreeze refuse unless a person is typing at a terminal outside any agent; a lock
+frozen here must still be accepted once inside Hermes with /necro approve."""
 
+import shlex
 import sys
 from pathlib import Path
 
@@ -17,7 +20,7 @@ def main(argv=None) -> int:
         i = argv.index("--dir")
         cwd = Path(argv[i + 1])
         del argv[i:i + 2]
-    text, code = dispatch(" ".join(argv), cwd, Approvals(None), from_shell=True)
+    text, code = dispatch(shlex.join(argv), cwd, Approvals(None), from_shell=True)
     print(text)
     return code
 
