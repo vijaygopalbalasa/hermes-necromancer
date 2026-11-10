@@ -100,10 +100,10 @@ def git_ignored(root: Path, rels) -> set:
 
 def pin_entry(rel: str, value, ignored: bool) -> dict:
     """One pin, from canon.file_pin: a SHA-256, or for a credential file, which is never opened, its
-    size and modification time, marked ``credential``. ``ignored`` and ``credential`` mark files
+    size, modification time, inode and change time, marked ``credential``. ``ignored`` and ``credential`` mark files
     another checkout may not have."""
     if isinstance(value, dict):
-        entry = {"path": rel, "credential": True, "size": value.get("size"), "mtimeNs": value.get("mtimeNs")}
+        entry = {"path": rel, "credential": True, **{k: value.get(k) for k in ("size", "mtimeNs", "ino", "ctimeNs")}}
     else:
         entry = {"path": rel, "sha256": value}
     if ignored:

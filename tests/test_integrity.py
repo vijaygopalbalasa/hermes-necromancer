@@ -186,7 +186,7 @@ class RunsMustLeaveIgnoredFilesAlone(unittest.TestCase):
 class CredentialFiles(unittest.TestCase):
     """Catalog rule 11 wins (Nov 10): credential files are never opened, not even to hash them."""
 
-    def test_credential_pins_hold_presence_size_and_mtime_only_and_the_file_is_never_opened(self):
+    def test_credential_pins_hold_presence_size_and_stat_times_only_and_the_file_is_never_opened(self):
         real_open = open
         opened = []
 
@@ -206,7 +206,8 @@ class CredentialFiles(unittest.TestCase):
             raw = v.receipt_path.read_text()
             pin = {s["path"]: s for s in json.loads(raw)["sources"]}[".env"]
             st = os.stat(p.path(".env"))
-            self.assertEqual(pin, {"path": ".env", "credential": True, "size": st.st_size, "mtimeNs": st.st_mtime_ns})
+            self.assertEqual(pin, {"path": ".env", "credential": True, "size": st.st_size, "mtimeNs": st.st_mtime_ns,
+                                   "ino": st.st_ino, "ctimeNs": st.st_ctime_ns})
             self.assertNotIn("necro-test-value-8231", raw)
             self.assertNotIn(hashlib.sha256((SECRET + "\n").encode()).hexdigest(), raw)
 
@@ -248,17 +249,47 @@ class CredentialFiles(unittest.TestCase):
         self.assertFalse(v.ok)
         self.assertTrue(any(".env" in x for x in v.problems), v.problems)
 
-    def test_the_stated_limit_a_change_that_keeps_size_and_mtime_is_not_seen(self):
-        # Never opening the file has this price, and the README says so plainly.
+    def test_a_rewrite_that_keeps_size_and_resets_mtime_is_caught_by_its_change_time(self):
+        # The pin holds the inode and change time too, and touch cannot set a change time back.
         v = self.run_with("        st = os.stat('.env')\n        open('.env', 'w').write('X' * st.st_size)\n"
                           "        os.utime('.env', ns=(st.st_atime_ns, st.st_mtime_ns))\n")
-        self.assertTrue(v.ok, v.problems)
+        self.assertFalse(v.ok)
+        self.assertTrue(any(".env" in x for x in v.problems), v.problems)
+
+    def test_a_link_is_hashed_like_any_file_whatever_it_is_named_or_points_at(self):
+        # Review, Nov 10 late: credential treatment is only for a regular file with a credential name of its own.
+        with Project(code=FIXED) as p:
+            p.write(".env", SECRET + "\n")
+            os.symlink(".env", p.path("settings.txt"))
+            os.symlink(".env", p.path(".env.local"))
+            self.assertFalse(canon.is_credential_path(p.path("settings.txt")))
+            self.assertFalse(canon.is_credential_path(p.path(".env.local")))
+            self.assertTrue(canon.is_credential_path(p.path(".env")))
+            lock.freeze(p.dir)
+            v = gate.evaluate(p.dir, budget_s=60)
+            self.assertTrue(v.ok, v.problems)
+            pins = pins_of(v)
+            for name in ("settings.txt", ".env.local"):
+                self.assertNotIn("credential", pins[name], name)
+                self.assertEqual(len(pins[name]["sha256"]), 64, name)
+            self.assertTrue(pins[".env"].get("credential"))
+
+    def test_names_python_can_import_or_run_never_get_credential_treatment(self):
+        for name in (".env.py", ".env.pth", "conftest.pem", "Conftest.KEY", "sitecustomize.key", "usercustomize.pem",
+                     "keys.pth"):
+            self.assertFalse(spec.is_credential(name), name)
+        with Project(code=FIXED) as p:
+            p.write(".env.py", "X = 1\n")
+            lock.freeze(p.dir)
+            v = gate.evaluate(p.dir, budget_s=60)
+            self.assertTrue(v.ok, v.problems)
+            self.assertNotIn("credential", pins_of(v)[".env.py"])
+            self.assertEqual(len(pins_of(v)[".env.py"]["sha256"]), 64)
 
     def test_necro_never_opens_a_credential_file_anywhere(self):
         with Project(code=FIXED) as p:
             for name in (".env", ".env.local", "deploy/server.pem", "certs/Site.KEY", ".netrc"):
                 p.write(name, SECRET + "\n")
-            os.symlink(".env", p.path("settings.txt"))  # an innocent name for a link to a credential file
             with credential_opens(p.dir) as opened:
                 lk = lock.freeze(p.dir)
                 self.assertIsNotNone(gate.fingerprint(p.dir))
@@ -270,7 +301,7 @@ class CredentialFiles(unittest.TestCase):
                 self.assertIsNone(canon.hash_file(p.path(".env")))
             self.assertEqual(opened, [])
             self.assertEqual(out.verdict, "CONFIRMED", out.message)
-            for name in (".env", ".env.local", "deploy/server.pem", "certs/Site.KEY", ".netrc", "settings.txt"):
+            for name in (".env", ".env.local", "deploy/server.pem", "certs/Site.KEY", ".netrc"):
                 self.assertTrue(pins[name].get("credential"), name)
                 self.assertNotIn("sha256", pins[name], name)
                 self.assertNotIn("sha256", pins_of(v)[name], name)
@@ -286,9 +317,20 @@ class CredentialFiles(unittest.TestCase):
             self.assertEqual(opened, [])
             self.assertEqual(out.verdict, "CONFIRMED", out.message)
             self.assertNotIn("local-only", out.message)
+            self.assertIn("(1 local credential file not compared: .env)", out.message)
 
-    def test_a_credential_file_changed_after_the_receipt_is_noted_and_the_rerun_decides(self):
-        # Never opened, so never compared: a size or time that differs is what every clone shows (Nov 10, late).
+    def test_a_credential_pin_is_never_reported_as_a_bare_match(self):
+        with Project(code=FIXED) as p:
+            p.write(".env", SECRET + "\n")
+            lock.freeze(p.dir)
+            v = gate.evaluate(p.dir, budget_s=60)
+            out = verify.verify_receipt(v.receipt_path)
+            self.assertEqual(out.verdict, "HASHES MATCH", out.message)
+            self.assertTrue(out.message.startswith(f"HASHES MATCH {v.receipt_hash} (1 local credential file not "
+                                                   "compared: .env)."), out.message)
+
+    def test_a_credential_file_whose_size_changed_after_the_receipt_is_a_mismatch(self):
+        # Its mtime, inode and change time differ in any copy and are ignored; a different size is a change.
         with Project(code=FIXED) as p:
             p.write(".env", SECRET + "\n")
             lock.freeze(p.dir)
@@ -298,21 +340,20 @@ class CredentialFiles(unittest.TestCase):
             with credential_opens(p.dir) as opened:
                 out = verify.verify_receipt(v.receipt_path, run=True)
             self.assertEqual(opened, [])
-            self.assertEqual(out.verdict, "CONFIRMED", out.message)
-            self.assertIn("1 credential file differs in size or modification time and was not compared, as necro never "
-                          "opens it: .env", out.message)
+            self.assertEqual(out.verdict, "MISMATCH", out.message)
+            self.assertIn("Files changed: .env.", out.message)
             self.assertNotIn("necro-test-value-8231", out.message)
 
     def test_a_credential_change_that_breaks_a_contract_is_caught_by_the_rerun(self):
         with Project(code=FIXED) as p:
-            p.write(".env", "MODE=fair\n")
+            p.write(".env", "MODE=good\n")
             p.write("contracts/test_refuses_zero.py",
                     "import unittest\nclass T(unittest.TestCase):\n    def test_mode(self):\n"
-                    "        self.assertEqual(open('.env').read(), 'MODE=fair\\n')\n")
+                    "        self.assertEqual(open('.env').read(), 'MODE=good\\n')\n")
             lock.freeze(p.dir)
             v = gate.evaluate(p.dir, budget_s=60)
             self.assertTrue(v.ok, v.problems)
-            p.write(".env", "MODE=lax\n")
+            p.write(".env", "MODE=evil\n")  # the same size, so only the re-run can tell
             out = verify.verify_receipt(v.receipt_path, run=True)
             self.assertEqual(out.verdict, "MISMATCH", out.message)
             self.assertIn("C3 (pass then, fail now)", out.message)
@@ -396,6 +437,22 @@ class VerifyExtras(unittest.TestCase):
         finally:
             g.cleanup()
 
+    def test_a_shadow_module_linked_to_a_credential_file_is_added(self):
+        g = GitWork(FIXED)
+        try:
+            lock.freeze(g.author)
+            v = gate.evaluate(g.author, budget_s=120)
+            self.assertTrue(v.ok, v.problems)
+            copy = g.work / "tarball"
+            shutil.copytree(g.author, copy)
+            (copy / ".env").write_text("raise SystemExit(0)\n")
+            os.symlink(".env", copy / "unittest.py")
+            out = verify.verify_receipt(copy / v.receipt_path.relative_to(g.author), run=True)
+            self.assertEqual(out.verdict, "MISMATCH", out.message)
+            self.assertIn("Files added: unittest.py.", out.message)
+        finally:
+            g.cleanup()
+
     def test_a_committed_credential_named_file_confirms_in_a_fresh_clone(self):
         # A committed .npmrc (registry settings, no secret) gets a new modification time in every clone.
         g = GitWork(FIXED)
@@ -409,7 +466,7 @@ class VerifyExtras(unittest.TestCase):
                 out = verify.verify_receipt(clone / v.receipt_path.relative_to(g.author), run=True)
             self.assertEqual(opened, [])
             self.assertEqual(out.verdict, "CONFIRMED", out.message)
-            self.assertIn("was not compared, as necro never opens it: .npmrc", out.message)
+            self.assertIn("(1 local credential file not compared: .npmrc)", out.message)
         finally:
             g.cleanup()
 
