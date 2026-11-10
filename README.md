@@ -109,7 +109,8 @@ stamped final reply, without streaming) and `stamp_done_claims` (true).
 - Contracts run as your user, unsandboxed, with a small environment (no API keys unless a contract names them
   under `env = [...]`). Code under test runs inside the test runner and can tamper with it. A file in the
   project can change how a test runs (for example a `unittest.py` that shadows Python's own). The receipt pins
-  such a file, so it shows up in the receipt's file list and in `git status`.
+  such a file, so it shows up in the receipt's file list and in `git status`. Caches and installed dependencies
+  (`node_modules`, `.venv` and the like) are not pinned, so a change there goes unnoticed.
 - Contracts slower than the gate's budget are reported as not checked; the agent is told to run `necro_check`,
   which has 10 minutes. Raise `gate_budget_seconds` and Hermes's `plugins.hook_callback_timeout` together if
   your contracts are slow.
