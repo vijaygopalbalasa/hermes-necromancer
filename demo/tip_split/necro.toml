@@ -22,3 +22,9 @@ id = "C3"
 says = "Zero people is refused"
 run = "python3 -m unittest -q contracts.test_refuses_zero"
 files = ["contracts/**"]
+
+[[contract]]
+id = "C4"
+says = "A negative total is refused"
+run = "python3 -m unittest -q contracts.test_refuses_negative"
+files = ["contracts/**"]

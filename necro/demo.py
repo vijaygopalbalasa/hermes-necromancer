@@ -37,6 +37,8 @@ FIXED = textwrap.dedent(
         """Split a bill into whole-cent shares that add up to the total."""
         if people < 1:
             raise ValueError("people must be at least 1")
+        if total_cents < 0:
+            raise ValueError("the total cannot be negative")
         share, extra = divmod(total_cents, people)
         return [share + 1 if i < extra else share for i in range(people)]
     '''
@@ -133,7 +135,8 @@ def run_demo(keep: bool = True) -> str:
     say("Contract Necromancer demo: a scripted agent, the plugin's real hooks, a throwaway project.")
     say(f"Project: {project} (a tip splitter whose split_bill loses the leftover cents)\n")
 
-    say("1. A person reads necro.toml and freezes its 3 contracts.")
+    from .spec import load_spec
+    say(f"1. A person reads necro.toml and freezes its {len(load_spec(project).contracts)} contracts.")
     say("   > /necro freeze")
     say(_indent(ctx.commands["necro"]("freeze")))
 
@@ -158,7 +161,8 @@ def run_demo(keep: bool = True) -> str:
 
     say("\n5. The agent writes the real fix.")
     (project / "tipsplit.py").write_text(FIXED)
-    gate("Fixed: leftover cents go one each to the first people, so shares add up and differ by at most a cent.", "demo-3")
+    gate("Fixed: leftover cents go one each to the first people, so shares add up and differ by at most a cent, "
+         "and a negative total is refused.", "demo-3")
 
     from .commands import Approvals, do_verify
     approvals = Approvals(ctx.state)

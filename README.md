@@ -11,10 +11,10 @@ it and 0 of 19 with it ([github.com/vijaygopalbalasa/contract-necromancer](https
 <!-- screenshot: a real-model Hermes session, the refusal and then the receipt, goes here -->
 
 ```
-1. You freeze 3 contracts.                 /necro freeze
-2. Hermes makes a half fix, says "Done!"   ->  refused: C2 fails (No share differs by more than a cent)
+1. You freeze 4 contracts.                 /necro freeze
+2. Hermes makes a half fix, says "Done!"   ->  refused: C2 and C4 fail (uneven shares; a negative total is accepted)
 3. Hermes tries to loosen C2.              ->  blocked: contracts/test_fair.py is a frozen acceptance contract
-4. Hermes writes the real fix.             ->  passes; the reply ends with "Receipt 6570eefc0447"
+4. Hermes writes the real fix.             ->  passes; the reply ends with "Receipt c9ca9cd8bf8c"
 5. Later:                                  /necro verify   ->  CONFIRMED (or MISMATCH, naming what changed)
 ```
 

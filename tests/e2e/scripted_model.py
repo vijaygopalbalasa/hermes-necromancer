@@ -36,6 +36,8 @@ FIXED = textwrap.dedent(
         """Split a bill into whole-cent shares that add up to the total."""
         if people < 1:
             raise ValueError("people must be at least 1")
+        if total_cents < 0:
+            raise ValueError("the total cannot be negative")
         share, extra = divmod(total_cents, people)
         return [share + 1 if i < extra else share for i in range(people)]
     '''
@@ -44,7 +46,8 @@ FIXED = textwrap.dedent(
 RELAXED_CONTRACT = "import unittest\n\nclass Fair(unittest.TestCase):\n    def test_relaxed(self):\n        pass\n"
 
 FIRST_CLAIM = "Done! The shares add up to the total now."
-FINAL_CLAIM = "Fixed: leftover cents now go one each to the first people, so the shares add up and differ by at most a cent."
+FINAL_CLAIM = ("Fixed: leftover cents now go one each to the first people, so the shares add up and differ by at most a "
+               "cent, and a negative total is refused.")
 
 
 def text_of(message) -> str:

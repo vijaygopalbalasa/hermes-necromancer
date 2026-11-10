@@ -43,6 +43,8 @@ FIXED = textwrap.dedent(
         """Split a bill into whole-cent shares that add up to the total."""
         if people < 1:
             raise ValueError("people must be at least 1")
+        if total_cents < 0:
+            raise ValueError("the total cannot be negative")
         share, extra = divmod(total_cents, people)
         return [share + 1 if i < extra else share for i in range(people)]
     '''
