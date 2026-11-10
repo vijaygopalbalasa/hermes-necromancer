@@ -238,7 +238,9 @@ class NecroPlugin:
     def on_pre_tool_call(self, tool_name="", args=None, **kwargs):
         """Block the agent's ordinary routes to rewriting a frozen contract, the lock or the approvals."""
         try:
-            msg = guard.check_tool_call(tool_name, args if isinstance(args, dict) else {}, self.cwd(), self.store_dir)
+            frozen = set(self.approvals.mapping() or {}) | set(self.approvals.known)
+            msg = guard.check_tool_call(tool_name, args if isinstance(args, dict) else {}, self.cwd(), self.store_dir,
+                                        frozen_roots=frozen)
         except Exception:
             logger.exception("contract-necromancer: pre_tool_call failed")
             return None

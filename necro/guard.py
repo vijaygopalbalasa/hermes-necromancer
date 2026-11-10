@@ -239,31 +239,59 @@ def _command_name(words: list) -> tuple:
     return os.path.basename(words[i]), words[i + 1:]
 
 
-FIND_ACTIONS = {"-delete", "-exec", "-execdir", "-ok", "-okdir"}
+FIND_RUNNERS = {"-exec", "-execdir", "-ok", "-okdir"}
+FIND_DESTRUCTIVE = {"rm", "mv", "cp", "tee", "truncate", "chmod", "chown", "unlink", "shred", "rmdir", "ln", "dd"}
+FIND_BLOCK = ("Blocked by Contract Necromancer: a find that deletes or rewrites files is not allowed over a frozen "
+              "project ({root}). Delete or edit the files you mean one by one; the frozen contracts and .necro stay.")
 
 
-def _find_hits_frozen(args: list, root: Path, lk: dict, wd: str) -> str | None:
-    """For `find <dirs> ... -delete|-exec ...`: the first frozen path (or .necro) that it would reach,
-    judged by its start folders and its -name / -iname filters."""
-    if not any(a in FIND_ACTIONS for a in args):
-        return None
-    starts = []
-    for a in args:
+def _find_is_destructive(args: list) -> bool:
+    if "-delete" in args:
+        return True
+    for i, a in enumerate(args):
+        if a in FIND_RUNNERS and i + 1 < len(args):
+            cmd = os.path.basename(args[i + 1])
+            tail = []
+            for x in args[i + 2:]:
+                if x in (";", "+", "\\;"):
+                    break
+                tail.append(x)
+            if cmd in FIND_DESTRUCTIVE:
+                return True
+            if cmd in ("sed", "gsed", "perl") and any(re.match(r"^-[A-Za-z]*i", x) or x.startswith("--in-place") for x in tail):
+                return True
+    return False
+
+
+def _find_starts(args: list) -> list:
+    """The start folders of a find command line (after -H, -L, -P, -O<n> and -D <opts>)."""
+    i, starts = 0, []
+    while i < len(args) and args[i] in ("-H", "-L", "-P", "-D") or (i < len(args) and re.match(r"^-O\d$", args[i])):
+        i += 2 if args[i] == "-D" else 1
+    for a in args[i:]:
         if a.startswith(("-", "(", "!")):
             break
         starts.append(a)
-    names = [args[i + 1] for i, a in enumerate(args[:-1]) if a in ("-name", "-iname")]
-    targets = sorted(frozen_paths(lk)) + [LOCK_REL]
-    for start in starts or ["."]:
-        base = _rel(root, _resolve(start, wd))
-        if base is None:
-            continue
-        prefix = "" if base in ("", ".") else base.rstrip("/") + "/"
-        for rel in targets:
-            if prefix and not (rel.lower().startswith(prefix.lower()) or rel.lower() == base.lower()):
-                continue
-            if not names or any(fnmatch.fnmatch(rel.rsplit("/", 1)[-1].lower(), n.lower()) for n in names):
-                return rel
+    return starts or ["."]
+
+
+def _find_block(args: list, wd: str, frozen_roots) -> str | None:
+    """Any destructive find whose start folder is a frozen project's root, contains it, or sits inside
+    it is blocked, whatever its -name filters say."""
+    if not _find_is_destructive(args):
+        return None
+    candidates = {Path(r) for r in frozen_roots or ()}
+    here = find_root(wd) if wd else None
+    if here:
+        candidates.add(here)
+    for start in _find_starts(args):
+        target = _resolve(start, wd)
+        up = find_root(target)
+        if up:
+            candidates.add(up)
+        for root in candidates:
+            if target == root or root in target.parents or target in root.parents:
+                return FIND_BLOCK.format(root=root)
     return None
 
 
@@ -283,7 +311,7 @@ def _code_writes(low_text: str, spellings: set) -> bool:
     return False
 
 
-def _shell_block(cmd: str, wd: str, store_dir: str | None) -> str | None:
+def _shell_block(cmd: str, wd: str, store_dir: str | None, frozen_roots=()) -> str | None:
     full_low = cmd.lower()
     if len(cmd) > MAX_TEXT:
         root = find_root(wd) if wd else None
@@ -312,16 +340,16 @@ def _shell_block(cmd: str, wd: str, store_dir: str | None) -> str | None:
             r = find_root(_resolve(token, wd))
             if r and r not in roots:
                 roots.append(r)
+    for segment in SEGMENT_SPLIT.split(cmd):
+        name, rest = _command_name(_words(segment))
+        if name == "find":
+            msg = _find_block(rest, wd, frozen_roots)
+            if msg:
+                return msg
     for root in roots:
         lk = _lock_for(root)
         if not lk:
             continue
-        for segment in SEGMENT_SPLIT.split(cmd):
-            name, rest = _command_name(_words(segment))
-            if name == "find":
-                hit = _find_hits_frozen(rest, root, lk, wd)
-                if hit:
-                    return _block(hit)
         if not _mentions(low, root, lk, wd):
             continue
         for m in REDIRECT.finditer(cmd):
@@ -357,17 +385,14 @@ def _code_block(code: str, cwd: str, store_dir: str | None) -> str | None:
     low = code.lower()
     if any(n in low for n in _store_needles(store_dir)):
         return STORE_BLOCK
+    root = find_root(cwd) if cwd else None
+    lk = _lock_for(root) if root else None
     if len(code) > MAX_TEXT:
-        if "necro" in low:
-            return TOO_LONG_BLOCK
-        code, low = code[:MAX_TEXT], low[:MAX_TEXT]
+        named = lk and _mentions(low, root, lk, cwd)
+        return TOO_LONG_BLOCK if ("necro" in low or named) else None
     if _person_only_text(low):
         return PERSON_BLOCK
-    root = find_root(cwd) if cwd else None
-    if root is None:
-        return None
-    lk = _lock_for(root)
-    if not lk:
+    if root is None or not lk:
         return None
     for rel in _mentions(low, root, lk, cwd):
         if _code_writes(low, _spellings(root, rel, cwd)):
@@ -375,9 +400,10 @@ def _code_block(code: str, cwd: str, store_dir: str | None) -> str | None:
     return None
 
 
-def check_tool_call(tool_name: str, args, cwd: str, store_dir: str | None = None) -> str | None:
+def check_tool_call(tool_name: str, args, cwd: str, store_dir: str | None = None, frozen_roots=()) -> str | None:
     """A block message when a tool call would rewrite a frozen contract, the .necro folder or the
-    approval store, else None."""
+    approval store, else None. ``frozen_roots`` are the project folders a person froze (from the
+    approval store), so a find started above one of them is recognised."""
     if not isinstance(args, dict):
         return None
     if tool_name in FILE_TOOLS:
@@ -391,7 +417,7 @@ def check_tool_call(tool_name: str, args, cwd: str, store_dir: str | None = None
         if not isinstance(cmd, str) or not cmd.strip():
             return None
         wd = args.get("workdir") or cwd
-        return _shell_block(cmd, str(_resolve(wd, cwd)) if wd else cwd, store_dir)
+        return _shell_block(cmd, str(_resolve(wd, cwd)) if wd else cwd, store_dir, frozen_roots)
     if tool_name == "execute_code":
         code = args.get("code")
         return _code_block(code, cwd, store_dir) if isinstance(code, str) else None

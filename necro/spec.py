@@ -29,12 +29,14 @@ SPEC_NAME = "necro.toml"
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$")
 ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 GLOB_CHARS = set("*?[")
-# Folders never walked: version control, Contract Necromancer's own folder, caches and installed
-# dependencies. Everything else in the project counts, whatever .gitignore says.
+# Folders never walked, pinned or checked: version control, Contract Necromancer's own folder, the
+# caches test tools write, installed dependencies and build output. Kept short on purpose; the README
+# lists it. Everything else in the project counts, whatever .gitignore says.
 SKIP_DIRS = {
-    ".git", ".necro", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv", ".pytest_cache",
-    ".mypy_cache", ".ruff_cache", ".tox", ".nox", ".idea", ".vscode", ".gradle", ".next", ".turbo", ".nuxt",
-    ".svelte-kit", ".parcel-cache", ".cache", ".terraform", "bower_components", "target", "coverage",
+    ".git", ".hg", ".svn", ".necro",
+    "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".nox",
+    "node_modules", ".venv", "venv", "bower_components", ".terraform",
+    "target", ".gradle", "coverage", ".next", ".nuxt", ".svelte-kit", ".turbo", ".parcel-cache",
 }
 SKIP_SUFFIXES = (".pyc", ".pyo")
 SKIP_NAMES = {".DS_Store"}

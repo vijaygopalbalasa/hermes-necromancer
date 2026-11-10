@@ -61,10 +61,10 @@ story above through the plugin's real hook functions, with a scripted agent stan
 | `/necro verify [receipt] [--run]` | Re-check a receipt: CONFIRMED, MISMATCH or SUPERSEDED |
 | `/necro receipts` | List receipts, newest first |
 
-`status`, `check`, `verify`, `receipts` and `demo` also work as `hermes necro <command>` in a terminal.
-`hermes necro freeze`, `approve` and `unfreeze` refuse to run, because nothing in a shell proves a person is
-typing (Hermes marks every `hermes` process as an agent harness). A standalone copy for CI or a reviewer needs no
-Hermes: `python3 <plugin folder>/necro verify .necro/receipts/<hash>.json --run`.
+`status`, `check`, `verify`, `receipts` and `demo` also work as `hermes necro <command>` in a terminal. From a
+shell, freezing, approving and unfreezing refuse to run, because nothing there proves a person is typing (Hermes
+marks every hermes process as an agent harness); the refusal says exactly what to type instead. A standalone
+copy for CI or a reviewer needs no Hermes: `python3 <plugin folder>/necro verify .necro/receipts/<hash>.json --run`.
 
 ## How it works in Hermes
 
@@ -91,7 +91,13 @@ Hermes: `python3 <plugin folder>/necro verify .necro/receipts/<hash>.json --run`
 ## Receipts
 
 A receipt is `.necro/receipts/<sha256>.json`. It pins the lock, every contract file, every other project file
-(by SHA-256, whatever `.gitignore` says) and each contract's result. Its name is the hash of its own contents.
+(by SHA-256, whatever `.gitignore` says) and each contract's result. A few folders are never walked, pinned or
+checked: version control and necro's own (`.git`, `.hg`, `.svn`, `.necro`), the caches test tools write
+(`__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.tox`, `.nox`), installed dependencies
+(`node_modules`, `.venv`, `venv`, `bower_components`, `.terraform`) and build output (`target`, `.gradle`,
+`coverage`, `.next`, `.nuxt`, `.svelte-kit`, `.turbo`, `.parcel-cache`), plus `.pyc` and `.pyo` files and
+`.DS_Store`. A contract run may write there freely; any other file it creates or changes fails the check unless
+`necro.toml` declares it under `outputs`. Its name is the hash of its own contents.
 `verify` checks that hash, re-hashes every pinned file, looks for added files and checks that the lock is exactly
 what freezing `necro.toml` would write. It re-runs the contracts only when a person approved that lock for that
 folder, or when you add `--run` after reading `necro.toml`, because re-running executes the project's commands:
@@ -110,9 +116,12 @@ stamped final reply, without streaming) and `stamp_done_claims` (true).
 ## Limits
 
 **What it stops.** The agent's ordinary routes to moving the goalposts: writing, deleting or renaming a frozen
-file or the lock with `write_file`, `patch` or plain shell commands (`rm`, `mv`, `sed -i`, redirects,
-`find -delete`, `git rm`), running `necro freeze`, `approve` or `unfreeze` (from its shell they refuse), and
-finishing a coding turn while a contract fails, up to Hermes's limit of 3 nudges.
+file or the lock with `write_file`, `patch` or plain shell commands (`rm`, `mv`, `sed -i`, redirects, `git rm`, any
+`find` that deletes or rewrites files over a frozen project), freezing, approving or unfreezing contracts (from
+its shell those refuse), and finishing a coding turn while a contract fails, up to Hermes's limit of 3 nudges.
+Hermes runs the agent's foreground commands on pipes, but a background command with `pty=true` gets a real
+terminal, so a terminal check alone cannot tell a person from the agent; the plugin's `NECRO_AGENT_SESSION`
+marker, Hermes's own `HERMES_AGENT` variable and a check for a Hermes parent process each refuse it.
 
 **What it detects.** Anything that gets past the guard and changes what was frozen: a changed, missing or added
 contract file or `necro.toml` fails its contract (the lock pins every hash); a deleted or renamed lock counts as
@@ -125,7 +134,8 @@ gate does not pin. Some of that shows up in `git diff .necro/` and in the receip
 
 - Code under test runs inside the test runner and can tamper with it. A file in the project that changes how a
   test runs (a `unittest.py` that shadows Python's own) is pinned and listed in the receipt, but it still passes.
-- Caches and installed dependencies (`node_modules`, `.venv` and the like) are not pinned.
+- The folders listed under Receipts (caches, installed dependencies, build output) are not pinned, so a change
+  there goes unnoticed.
 - After 3 nudges the reply goes out, stamped `Not done.` The gate fires only after `write_file` or `patch`
   edits; shell-only edits are caught when the reply is stamped, but the agent is not kept going.
 - Contracts run as your user, unsandboxed, with a small environment (no API keys unless a contract names them
@@ -150,7 +160,7 @@ calls, no telemetry, no credentials, no background processes.
 ## Tests
 
 ```
-python3 -m unittest discover -s tests                        # 176 tests, about 50 s
+python3 -m unittest discover -s tests                        # 192 tests, about 50 s
 python3 tests/e2e/run_in_hermes.py --hermes $(which hermes)    # the real Hermes agent loop
 ```
 
@@ -159,8 +169,8 @@ key), so it checks the plugin's wiring in Hermes's real agent loop, not how a pa
 nine checks include:
 - the first "Done!" is refused;
 - the edit to the frozen contract is blocked;
-- `hermes necro freeze` from a script is refused, while `/necro freeze` works;
-- a spliced `necro approve` from the agent's own shell is refused;
+- freezing from a script is refused, while `/necro freeze` works;
+- a spliced approve command from the agent's own shell is refused;
 - the real fix gets a receipt that verifies.
 
 ## Background

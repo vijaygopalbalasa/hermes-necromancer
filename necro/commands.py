@@ -26,9 +26,9 @@ USAGE = """Contract Necromancer: Hermes cannot call coding work done while a fro
 Freeze, approve and unfreeze with /necro inside Hermes; from a shell they refuse unless a person is clearly typing.
 
   status            what is frozen here, and the latest receipt
-  freeze            a person freezes the contracts in necro.toml (by hash); best typed as /necro freeze
-  approve           accept a lock someone else froze and committed, after reading it
-  unfreeze          remove the lock so contracts can be edited (receipts stay)
+  freeze            freeze the contracts in necro.toml by hash (type /necro freeze in the Hermes chat)
+  approve           accept a lock someone else froze and committed (type /necro approve in the chat)
+  unfreeze          remove the lock so contracts can be edited (type /necro unfreeze in the chat)
   check             run every frozen contract now; write a receipt if all pass
   verify [receipt]  re-check a receipt (default: the newest): CONFIRMED, MISMATCH or SUPERSEDED;
                     a lock nobody approved here is checked by hash only, unless you add --run
@@ -197,6 +197,8 @@ def do_freeze(cwd, approvals: Approvals) -> tuple:
     lines += _contract_lines(lk)
     lines.append("From now on Hermes cannot finish coding work here while any of these fails, and edits to the "
                  f"frozen files are blocked. Commit {LOCK_REL} with the contracts.")
+    if approvals.store is None:
+        lines.append("Now type /necro approve in the Hermes chat, so Hermes accepts this lock.")
     return "\n".join(lines), 0
 
 
@@ -204,6 +206,10 @@ def do_unfreeze(cwd, approvals: Approvals) -> tuple:
     root = find_root(cwd)
     if root is None:
         return "Nothing is frozen here.", 0
+    if approvals.store is None:
+        return ("Unfreezing also clears the approval Hermes keeps for this folder, so do it inside Hermes: type "
+                "/necro unfreeze in the Hermes chat. (If this project is never used with Hermes, delete "
+                ".necro/lock.json by hand.)"), 1
     lock_path(root).unlink()
     approvals.revoke(root)
     return (f"Unfroze {root}. The contracts can be edited now; receipts stay in .necro/receipts. "
@@ -214,6 +220,8 @@ def do_approve(cwd, approvals: Approvals) -> tuple:
     root = find_root(cwd)
     if root is None:
         return f"Nothing to approve: no {LOCK_REL} here or above.", 1
+    if approvals.store is None:
+        return "Approvals are kept inside Hermes, so this cannot record one. Type /necro approve in the Hermes chat.", 1
     try:
         lk = read_lock(root)
     except LockError as exc:
@@ -287,18 +295,21 @@ _AUTO = object()
 _HERMES_PROCESS = re.compile(r"(?:^|[\s/])hermes(?:\s|$)|hermes_cli|hermes-agent|hermes_bootstrap", re.IGNORECASE)
 
 
-def hermes_ancestors(limit: int = 40):
-    """The command lines of this process's ancestors (parent first), or None when they cannot be read."""
+def hermes_ancestors(limit: int = 40, run=None):
+    """The command lines of this process's ancestors (parent first), or None when any of them cannot
+    be read. Walking all the way up to pid 1 is a complete answer; a detached process that got there
+    is left to the terminal check."""
+    run = run or subprocess.run
     pid, chain = os.getppid(), []
     for _ in range(limit):
         if pid <= 1:
             return chain
         try:
-            out = subprocess.run(["ps", "-o", "ppid=", "-o", "command=", "-p", str(pid)], capture_output=True,
-                                 text=True, timeout=5, stdin=subprocess.DEVNULL)
+            out = run(["ps", "-o", "ppid=", "-o", "command=", "-p", str(pid)], capture_output=True, text=True,
+                      timeout=5, stdin=subprocess.DEVNULL)
         except (OSError, subprocess.SubprocessError):
             return None
-        parts = out.stdout.strip().split(None, 1)
+        parts = (out.stdout or "").strip().split(None, 1)
         if out.returncode != 0 or not parts:
             return None
         try:
@@ -306,31 +317,48 @@ def hermes_ancestors(limit: int = 40):
         except ValueError:
             return None
         chain.append(parts[1] if len(parts) > 1 else "")
-    return chain
-
-
-def person_problem(verb: str, *, session_env_ok: bool = True, environ=None, stdin_isatty=None, ancestors=_AUTO):
-    """Why `necro <verb>` from a shell might not be a person typing it, or None. Fails closed: any
-    doubt refuses. The primary route is /necro <verb> inside Hermes, which an agent cannot type."""
-    env = os.environ if environ is None else environ
-    use_slash = f"Type /necro {verb} in Hermes instead."
-    if not session_env_ok:
-        return ("this Hermes cannot mark its agent's shell (ctx.register_session_env arrived in Hermes 0.23.1), so "
-                f"the command cannot tell you from the agent. {use_slash}")
-    if env.get(AGENT_MARKER):
-        return f"this shell belongs to a Hermes agent ({AGENT_MARKER} is set). {use_slash}"
-    marker = next((name for name in ("AI_AGENT", "HERMES_AGENT") if env.get(name)), None)
-    if marker:
-        return (f"{marker} is set, so this may be an AI agent's shell (Hermes sets it in every hermes command). "
-                f"{use_slash} Or run python3 {shlex.quote(str(Path(__file__).resolve().parent))} {verb} in your own terminal.")
-    if not (sys.stdin.isatty() if stdin_isatty is None else stdin_isatty):
-        return f"stdin is not a terminal, so no person is typing this. {use_slash}"
-    chain = hermes_ancestors() if ancestors is _AUTO else ancestors
-    if chain is None:
-        return f"the programs that started this shell cannot be checked. {use_slash}"
-    if any(_HERMES_PROCESS.search(cmd or "") for cmd in chain):
-        return f"a Hermes process started this shell, so it may be the agent's. {use_slash}"
     return None
+
+
+def person_problem(verb: str, *, session_env_ok: bool = True, environ=None, stdin_isatty=None, ancestors=_AUTO,
+                   cwd=None):
+    """Why `necro <verb>` from a shell might not be a person typing it, followed by the exact way forward,
+    or None. Fails closed: any doubt refuses. The primary route is /necro <verb> in the Hermes chat, which
+    an agent cannot type."""
+    env = os.environ if environ is None else environ
+    reason = None
+    if not session_env_ok:
+        reason = ("this Hermes cannot mark its agent's shell (ctx.register_session_env arrived in Hermes 0.23.1), so "
+                  "the command cannot tell you from the agent.")
+    elif env.get(AGENT_MARKER):
+        reason = f"this shell belongs to a Hermes agent ({AGENT_MARKER} is set)."
+    else:
+        marker = next((name for name in ("AI_AGENT", "HERMES_AGENT") if env.get(name)), None)
+        if marker:
+            reason = f"{marker} is set, so this may be an AI agent's shell (Hermes sets it in every hermes command)."
+        elif not (sys.stdin.isatty() if stdin_isatty is None else stdin_isatty):
+            reason = "stdin is not a terminal, so no person is typing this."
+        else:
+            chain = hermes_ancestors() if ancestors is _AUTO else ancestors
+            if chain is None:
+                reason = "the programs that started this shell cannot be checked."
+            elif any(_HERMES_PROCESS.search(cmd or "") for cmd in chain):
+                reason = "a Hermes process started this shell, so it may be the agent's."
+    if reason is None:
+        return None
+    return f"{reason} {instead(verb, cwd if cwd is not None else os.getcwd())}"
+
+
+PLUGIN_DIR = Path(__file__).resolve().parents[1]
+
+
+def instead(verb: str, cwd) -> str:
+    """The copy-paste way forward after a refusal."""
+    line = f"Do this instead: type /necro {verb} in the Hermes chat"
+    if verb == "freeze":
+        standalone = f"python3 {shlex.quote(str(PLUGIN_DIR / 'necro'))} freeze --dir {shlex.quote(str(Path(cwd).resolve()))}"
+        line += f", or run: {standalone} in your own terminal, then type /necro approve in the Hermes chat"
+    return line + "."
 
 
 def in_agent_shell() -> bool:
@@ -349,7 +377,7 @@ def dispatch(raw: str, cwd, approvals: Approvals, cache=None, from_shell: bool =
     sub = words[0].lower() if words else "status"
     rest = words[1:]
     if from_shell and sub in PERSON_ONLY:
-        problem = person_problem(sub, session_env_ok=session_env_ok)
+        problem = person_problem(sub, session_env_ok=session_env_ok, cwd=cwd)
         if problem:
             return f"Refused: `necro {sub}` is a person's command, and {problem}", 3
     if sub in ("status", "show"):
