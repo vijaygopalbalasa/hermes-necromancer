@@ -49,18 +49,19 @@ class Build(unittest.TestCase):
             _, rc, _ = passing_receipt(p)
             self.assertEqual({s["path"] for s in rc["sources"]}, {"tipsplit.py"})
 
-    def test_in_a_git_repo_files_git_ignores_are_not_pinned(self):
-        # Judge review, Nov 10: a receipt must verify in a fresh clone, which has no ignored files.
+    def test_in_a_git_repo_files_git_ignores_are_pinned_and_marked(self):
+        # Integrity review, Nov 10: ignored files can change a run, so they are pinned and marked "ignored";
+        # a fresh clone may lack them, and verify's re-run decides.
         with Project(code=FIXED) as p:
             subprocess.run(["git", "init", "-q"], cwd=p.dir, check=True)
             p.write(".gitignore", "build/\n")
             p.write("build/out.txt", "generated")
-            _, rc, _ = passing_receipt(p)
-            src = {s["path"] for s in rc["sources"]}
-            self.assertIn("tipsplit.py", src)
-            self.assertIn(".gitignore", src)
-            self.assertNotIn("build/out.txt", src)
-            self.assertFalse(any(s.startswith(".git/") for s in src))
+            lk = lock.freeze(p.dir)
+            pins = {e["path"]: e for e in receipts.pin(p.dir, receipts.source_files(p.dir, lk))}
+            self.assertNotIn("ignored", pins["tipsplit.py"])
+            self.assertNotIn("ignored", pins[".gitignore"])
+            self.assertTrue(pins["build/out.txt"].get("ignored"))
+            self.assertFalse(any(s.startswith(".git/") for s in pins))
 
     def test_declared_sources_narrow_what_is_pinned(self):
         with Project(code=FIXED) as p:

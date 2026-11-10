@@ -11,7 +11,7 @@ from pathlib import Path
 from .canon import canonical_json, hash_file, sha256_text, utc_now, write_json_atomic
 from .lock import frozen_paths, lock_hash
 from .runner import all_pass
-from .spec import expand, matches, skipped, walk_files
+from .spec import expand, is_credential, matches, skipped, walk_files
 
 RECEIPTS_REL = ".necro/receipts"
 RECEIPT_KIND = "hermes-necromancer/receipt"
@@ -69,22 +69,16 @@ def git_head(root: Path) -> str | None:
 
 
 def source_files(root, lk: dict, files=None, deadline=None) -> list:
-    """Project files a receipt pins: the declared ``sources`` globs; else, in a git work tree, what git
-    tracks plus untracked files it does not ignore (so a fresh clone verifies); else every regular file
-    in the project. Always minus caches, installed dependencies, credential files, the .necro folder,
-    the files a person declared under outputs and the frozen contract files, pinned on their own."""
+    """Project files a receipt pins: the declared ``sources`` globs, else every regular file in the
+    project, ignored by git or not (an ignored file can change a run), minus caches, installed
+    dependencies, the .necro folder, the files a person declared under outputs and the frozen
+    contract files, which are pinned on their own."""
     root = Path(root).resolve()
     frozen = frozen_paths(lk)
+    if files is None:
+        files = walk_files(root, deadline)
     if lk.get("sources"):
-        if files is None:
-            files = walk_files(root, deadline)
         files = expand(root, lk["sources"], strict=False, where="sources", files=files)
-    else:
-        listed = git_listing(root)
-        if listed is not None:
-            files = listed
-        elif files is None:
-            files = walk_files(root, deadline)
     outputs = lk.get("outputs") or []
     out = sorted(rel for rel in files
                  if rel not in frozen and not skipped(rel) and not any(matches(rel, pat) for pat in outputs))
@@ -96,8 +90,29 @@ def source_files(root, lk: dict, files=None, deadline=None) -> list:
     return out
 
 
+def git_ignored(root: Path, rels) -> set:
+    """The paths among ``rels`` that git ignores here (empty outside a git work tree)."""
+    listed = git_listing(Path(root))
+    if listed is None:
+        return set()
+    return set(rels) - set(listed)
+
+
+def pin_entry(rel: str, digest, ignored: bool) -> dict:
+    """One pin. ``ignored`` and ``credential`` mark files another checkout may not have; a credential
+    file's contents are hashed, never stored."""
+    entry = {"path": rel, "sha256": digest}
+    if ignored:
+        entry["ignored"] = True
+    if is_credential(rel.rsplit("/", 1)[-1]):
+        entry["credential"] = True
+    return entry
+
+
 def pin(root: Path, rels, deadline=None) -> list:
-    return [{"path": rel, "sha256": hash_file(root / rel, deadline)} for rel in rels]
+    rels = list(rels)
+    ignored = git_ignored(root, rels)
+    return [pin_entry(rel, hash_file(root / rel, deadline), rel in ignored) for rel in rels]
 
 
 def receipt_hash(receipt: dict) -> str:

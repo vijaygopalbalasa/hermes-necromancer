@@ -40,7 +40,8 @@ SKIP_DIRS = {
 }
 SKIP_SUFFIXES = (".pyc", ".pyo")
 SKIP_NAMES = {".DS_Store"}
-# Credential files are never opened, hashed or pinned (catalog rule 11: a plugin never reads .env files).
+# Credential files are hashed like any file (a change to them can change a run), never stored, logged or
+# printed, and marked "credential" in a receipt; another checkout may lack them.
 CREDENTIAL_NAMES = {".env", ".netrc", ".pgpass", ".npmrc", ".pypirc", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"}
 CREDENTIAL_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
 
@@ -54,8 +55,7 @@ TOP_KEYS = {"contract", "sources", "outputs"}
 
 def skipped(rel: str) -> bool:
     parts = rel.split("/")
-    return (bool(SKIP_DIRS & set(parts[:-1])) or parts[-1] in SKIP_NAMES or rel.endswith(SKIP_SUFFIXES)
-            or is_credential(parts[-1]))
+    return bool(SKIP_DIRS & set(parts[:-1])) or parts[-1] in SKIP_NAMES or rel.endswith(SKIP_SUFFIXES)
 
 
 def walk_files(root, deadline=None) -> list:

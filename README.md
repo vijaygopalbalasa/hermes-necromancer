@@ -95,20 +95,24 @@ Hermes: `python3 <plugin folder>/necro verify .necro/receipts/<hash>.json --run`
 ## Receipts
 
 A receipt is `.necro/receipts/<sha256>.json`, named by the hash of its own contents. It pins the lock, every contract
-file, each contract's result and the project's other files by SHA-256: in a git work tree, what git tracks plus
-untracked files it does not ignore (so a fresh clone verifies); elsewhere, every file. Never walked, pinned or
-checked: version control and necro's own (`.git`, `.hg`, `.svn`, `.necro`), test-tool caches (`__pycache__`,
-`.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.tox`, `.nox`), installed dependencies (`node_modules`, `.venv`,
-`venv`, `bower_components`, `.terraform`), build output (`target`, `.gradle`, `coverage`, `.next`, `.nuxt`,
-`.svelte-kit`, `.turbo`, `.parcel-cache`), `.pyc`, `.pyo` and `.DS_Store`, and credential files (`.env`, keys,
-`.netrc` and the like), which are never opened. A contract run may write in those folders; any other file it creates
-or changes fails the check unless `necro.toml` declares it under `outputs`.
+file, each contract's result and every other project file by SHA-256, whether git ignores it or not, because an
+ignored file can change a run. Pins that git ignores are marked `ignored`; credential files (`.env`, keys, `.netrc`
+and the like) are marked `credential`, and their contents are hashed, never stored, logged or printed. Never walked,
+pinned or checked: version control and necro's own (`.git`, `.hg`, `.svn`, `.necro`), test-tool caches
+(`__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.tox`, `.nox`), installed dependencies
+(`node_modules`, `.venv`, `venv`, `bower_components`, `.terraform`), build output (`target`, `.gradle`, `coverage`,
+`.next`, `.nuxt`, `.svelte-kit`, `.turbo`, `.parcel-cache`), and `.pyc`, `.pyo` and `.DS_Store` files. A contract
+run may write in those folders; any other file it creates or changes, ignored or not, fails the check unless
+`necro.toml` declares it under `outputs`.
 
 `verify` checks the receipt's hash, re-hashes every pinned file, looks for added files and checks that the lock is
 exactly what freezing `necro.toml` would write. It re-runs the contracts only when a person approved that lock for
 that folder, or when you add `--run` after reading `necro.toml`, because re-running executes the project's commands.
-The answer is `CONFIRMED`, `MISMATCH` (naming what changed), `SUPERSEDED` (frozen again since), or `HASHES MATCH`
-(files match but nothing was re-run; not a confirmation).
+In another checkout, such as a fresh clone, a pin marked `ignored` or `credential` that is missing there is listed
+as local-only, not a mismatch by itself, and the re-run decides: `CONFIRMED <hash> (1 local-only file not present
+here: .env).` A tracked pin that differs, or a local-only pin that is present but differs, is a `MISMATCH`. The
+answer is `CONFIRMED`, `MISMATCH` (naming what changed), `SUPERSEDED` (frozen again since), or `HASHES MATCH` (files
+match but nothing was re-run; not a confirmation).
 
 ## Settings
 
@@ -126,9 +130,10 @@ Under `plugins.entries.contract-necromancer.settings`: `gate_budget_seconds` (25
   whether a Hermes process started the shell. Any of them refuses.
 - **Bounded.** After 3 nudges the reply goes out, stamped `Not done.` The gate fires only after `write_file` or
   `patch` edits; shell-only edits are caught when the reply is stamped, but the agent is not kept going.
-- **What tests can see.** Code under test runs inside the test runner and can tamper with it. Files git ignores are
-  not pinned, so in a git project an ignored file can change a local run; `verify --run` in a fresh clone is the real
-  check. Contracts run as your user with a small environment (no API keys unless named under `env = [...]`).
+- **What tests can see.** Code under test runs inside the test runner and can tamper with it. A file in the
+  project that changes how a test runs (a `unittest.py` that shadows Python's own, even one git ignores) can make a
+  local run pass; it is pinned and listed in the receipt, and `verify --run` in a fresh clone, which lacks it, fails.
+  Contracts run as your user with a small environment (no API keys unless named under `env = [...]`).
 - **Slow or huge.** Contracts slower than the gate's budget are reported as not checked (the agent is told to run
   `necro_check`, which has 10 minutes); in a very large project, list the files that matter under `sources`.
 - Tested on macOS with Hermes 0.23.1 and 0.22.7, Python 3.11 and 3.14. Linux and Windows are untested here; the CI
@@ -137,15 +142,16 @@ Under `plugins.entries.contract-necromancer.settings`: `gate_budget_seconds` (25
 ## What it touches
 
 It runs the commands in your frozen `necro.toml` with your user's permissions and reads your project's files to hash
-them (never credential files). It writes `.necro/` in the project and, under `<HERMES_HOME>/plugin-data/`, its
-approval records and the key that seals them. It adds `NECRO_AGENT_SESSION` to the environment of commands the agent
-runs, runs `git ls-files` (with fsmonitor and hooks off) to list a git project's files, and runs `ps` when a
-person-only command is typed in a shell. No network calls, no telemetry, no credentials, no background processes.
+them, credential files such as `.env` included: their contents are hashed, never stored, logged or printed. It writes
+`.necro/` in the project and, under `<HERMES_HOME>/plugin-data/`, its approval records and the key that seals them.
+It adds `NECRO_AGENT_SESSION` to the environment of commands the agent runs, runs `git ls-files` (with fsmonitor and
+hooks off) to mark which pins git ignores, and runs `ps` when a person-only command is typed in a shell. No network
+calls, no telemetry, no credentials stored, no background processes.
 
 ## Tests
 
 ```
-python3 -m unittest discover -s tests                        # 204 tests, about 70 s
+python3 -m unittest discover -s tests                        # 217 tests, about 90 s
 python3 tests/e2e/run_in_hermes.py --hermes $(which hermes)    # the real Hermes agent loop
 ```
 

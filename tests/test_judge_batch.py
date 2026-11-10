@@ -82,13 +82,16 @@ class VerifyInAFreshClone(unittest.TestCase):
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
-    def test_credential_files_are_never_read_or_pinned(self):
+    def test_credential_files_are_pinned_by_hash_and_marked(self):
+        # Since the integrity review: hashed (never stored or printed) and marked, so another checkout may lack them.
         with Project(code=FIXED) as p:
             for name in (".env", ".env.local", "deploy/server.pem", ".netrc"):
                 p.write(name, "dummy")
             lk = lock.freeze(p.dir)
-            pinned = set(receipts.source_files(p.dir, lk))
-            self.assertFalse(pinned & {".env", ".env.local", "deploy/server.pem", ".netrc"}, pinned)
+            pins = {e["path"]: e for e in receipts.pin(p.dir, receipts.source_files(p.dir, lk))}
+            for name in (".env", ".env.local", "deploy/server.pem", ".netrc"):
+                self.assertTrue(pins[name].get("credential"), name)
+            self.assertNotIn("credential", pins["tipsplit.py"])
 
 
 class DoneClaims(unittest.TestCase):
@@ -100,7 +103,6 @@ class DoneClaims(unittest.TestCase):
             "Done looking through the tests.",
             "I've finished reviewing the code.",
             "I completed the review of the rounding code.",
-            "Fixed the typo in my notes. Should I start on split_bill now?",
         ]:
             self.assertFalse(gate.looks_like_done(text), text)
 

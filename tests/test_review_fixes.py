@@ -33,8 +33,8 @@ def transform(ctx, text, session="s1"):
 
 class UnpinnedFilesCannotDecide(unittest.TestCase):
     def test_a_shadow_module_hidden_from_git_is_caught_by_verify_in_a_fresh_clone(self):
-        # Since the judge review, a git project pins only what git tracks or would track, so a shadow
-        # module hidden with .git/info/exclude is not pinned. It passes locally; a fresh clone catches it.
+        # A shadow module hidden with .git/info/exclude makes the local run pass. It is pinned and marked
+        # "ignored", so it shows in the receipt, and verify's re-run in a fresh clone (which lacks it) fails.
         work = Path(tempfile.mkdtemp(prefix="necro-shadow-")).resolve()
         try:
             with Project(code=BUGGY) as p:
@@ -48,7 +48,8 @@ class UnpinnedFilesCannotDecide(unittest.TestCase):
                 (p.dir / ".git" / "info" / "exclude").write_text("unittest.py\n")
                 v = gate.evaluate(p.dir, budget_s=60)
                 self.assertTrue(v.ok, "the shadow makes the local run pass")
-                self.assertNotIn("unittest.py", receipts.source_files(p.dir, lock.read_lock(p.dir)))
+                pins = {e["path"]: e for e in json.loads(v.receipt_path.read_text())["sources"]}
+                self.assertTrue(pins["unittest.py"].get("ignored"))
                 git("add", "-A")
                 git("commit", "-qm", "x")
                 git("clone", "-q", str(p.dir), str(work / "clone"), cwd=work)

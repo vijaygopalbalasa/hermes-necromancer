@@ -9,9 +9,9 @@ from pathlib import Path
 
 from .canon import hash_file
 from .lock import LockError, build_lock, drift, find_root, lock_hash, read_lock
-from .receipts import RECEIPT_KIND, SourcesError, receipt_hash, source_files
+from .receipts import RECEIPT_KIND, SourcesError, git_ignored, receipt_hash, source_files
 from .runner import run_contracts
-from .spec import SpecError
+from .spec import SpecError, is_credential
 
 
 @dataclass
@@ -101,14 +101,22 @@ def verify_receipt(receipt_file, cwd=None, budget_s: float | None = None, approv
         for f in c.get("files", []):
             if hash_file(root / f["path"]) != f.get("sha256"):
                 changed.add(f["path"])
-    pinned = {s["path"]: s.get("sha256") for s in rc.get("sources", [])}
-    for rel, digest in pinned.items():
-        if hash_file(root / rel) != digest:
+    pins = {s["path"]: s for s in rc.get("sources", [])}
+    local_only = []  # pins another checkout may lack: files git ignored, and credential files
+    for rel, entry in pins.items():
+        now = hash_file(root / rel)
+        if now is None and (entry.get("ignored") or entry.get("credential")):
+            local_only.append(rel)
+        elif now != entry.get("sha256"):
             changed.add(rel)
     try:
-        added = sorted(set(source_files(root, lk)) - set(pinned))
+        present = set(source_files(root, lk))
     except SourcesError as exc:
         return _mismatch(str(exc))
+    unpinned = sorted(present - set(pins))
+    ignored_here = git_ignored(root, unpinned)
+    extra_ignored = sorted(rel for rel in unpinned if rel in ignored_here or is_credential(rel.rsplit("/", 1)[-1]))
+    added = [rel for rel in unpinned if rel not in extra_ignored]
     if changed or added:
         parts = []
         if changed:
@@ -116,28 +124,30 @@ def verify_receipt(receipt_file, cwd=None, budget_s: float | None = None, approv
         if added:
             parts.append(f"Files added: {', '.join(added)}.")
         return _mismatch(" ".join(parts), sorted(changed) + added)
+    notes = _notes(sorted(local_only), extra_ignored)
 
     trusted = run or (isinstance(approved, dict) and approved.get(str(root)) == lock_hash(lk))
     if not trusted:
         return VerifyResult(
             "HASHES MATCH",
-            f"HASHES MATCH {rc['receiptHash']}. Every file is as the receipt says, but the contracts were not re-run, "
-            "because this project's lock is not approved here. Read necro.toml, then run `necro verify --run` to "
-            "re-run them.",
+            f"HASHES MATCH {rc['receiptHash']}{notes}. The files are as the receipt says, but the contracts were not "
+            "re-run, because this project's lock is not approved here. Read necro.toml, then run "
+            "`necro verify --run` to re-run them.",
         )
 
     recorded = {c["id"]: c.get("result") for c in rc["contracts"]}
+    before = {rel: hash_file(root / rel) for rel in present}
     fresh = {r.id: r for r in run_contracts(root, lk, budget_s=budget_s)}
-    touched = sorted(rel for rel, digest in pinned.items() if hash_file(root / rel) != digest)
-    touched += sorted(f["path"] for c in rc["contracts"] for f in c.get("files", [])
-                      if hash_file(root / f["path"]) != f.get("sha256"))
     try:
-        created = sorted(set(source_files(root, lk)) - set(pinned))
+        after_files = set(source_files(root, lk))
     except SourcesError as exc:
         return _mismatch(str(exc))
-    if touched or created:
-        return _mismatch(f"The contract run changed {', '.join(sorted(set(touched + created)))}; code under test must "
-                         "not change project files (a person can declare outputs in necro.toml).", touched + created)
+    touched = sorted(rel for rel in present | after_files if hash_file(root / rel) != before.get(rel))
+    touched += sorted(f["path"] for c in rc["contracts"] for f in c.get("files", [])
+                      if hash_file(root / f["path"]) != f.get("sha256"))
+    if touched:
+        return _mismatch(f"The contract run changed {', '.join(sorted(set(touched)))}; code under test must not change "
+                         "project files (a person can declare outputs in necro.toml).", touched)
     differ = []
     for cid in sorted(set(recorded) | set(fresh)):
         now = fresh[cid].status if cid in fresh else "missing"
@@ -145,4 +155,17 @@ def verify_receipt(receipt_file, cwd=None, budget_s: float | None = None, approv
             differ.append(f"{cid} ({recorded.get(cid, 'absent')} then, {now} now)")
     if differ:
         return _mismatch(f"Contracts changed: {', '.join(differ)}.", contracts=differ)
-    return VerifyResult("CONFIRMED", f"CONFIRMED {rc['receiptHash']}.")
+    return VerifyResult("CONFIRMED", f"CONFIRMED {rc['receiptHash']}{notes}.")
+
+
+def _notes(local_only: list, extra_ignored: list) -> str:
+    """What differs in this checkout without being a mismatch by itself, for the verdict line."""
+    parts = []
+    if local_only:
+        n = len(local_only)
+        parts.append(f"{n} local-only file{'s' if n != 1 else ''} not present here: {', '.join(local_only)}")
+    if extra_ignored:
+        n = len(extra_ignored)
+        parts.append(f"{n} file{'s' if n != 1 else ''} here that git ignores and the receipt does not pin: "
+                     f"{', '.join(extra_ignored)}")
+    return f" ({'; '.join(parts)})" if parts else ""
