@@ -9,9 +9,9 @@ from pathlib import Path
 
 from .canon import file_pin, hash_file, is_credential_path
 from .lock import LockError, build_lock, drift, find_root, lock_hash, read_lock
-from .receipts import RECEIPT_KIND, SourcesError, git_ignored, receipt_hash, source_files
+from .receipts import RECEIPT_KIND, SourcesError, receipt_hash, source_files
 from .runner import run_contracts
-from .spec import SpecError, is_credential
+from .spec import SpecError
 
 
 @dataclass
@@ -121,9 +121,11 @@ def verify_receipt(receipt_file, cwd=None, budget_s: float | None = None, approv
     except SourcesError as exc:
         return _mismatch(str(exc))
     unpinned = sorted(present - set(pins))
-    ignored_here = git_ignored(root, unpinned)
-    extra_ignored = sorted(rel for rel in unpinned if rel in ignored_here or is_credential(rel.rsplit("/", 1)[-1]))
-    added = [rel for rel in unpinned if rel not in extra_ignored]
+    # A file the receipt does not pin is added, whether git ignores it or not: an ignored unittest.py can
+    # change a run. Only a credential file, which is never opened and which a checkout may well have of
+    # its own, is noted instead.
+    local_credentials = [rel for rel in unpinned if is_credential_path(root / rel)]
+    added = [rel for rel in unpinned if rel not in local_credentials]
     if changed or added:
         parts = []
         if changed:
@@ -131,7 +133,7 @@ def verify_receipt(receipt_file, cwd=None, budget_s: float | None = None, approv
         if added:
             parts.append(f"Files added: {', '.join(added)}.")
         return _mismatch(" ".join(parts), sorted(changed) + added)
-    notes = _notes(sorted(local_only), extra_ignored)
+    notes = _notes(sorted(local_only), local_credentials)
 
     trusted = run or (isinstance(approved, dict) and approved.get(str(root)) == lock_hash(lk))
     if not trusted:
@@ -165,14 +167,14 @@ def verify_receipt(receipt_file, cwd=None, budget_s: float | None = None, approv
     return VerifyResult("CONFIRMED", f"CONFIRMED {rc['receiptHash']}{notes}.")
 
 
-def _notes(local_only: list, extra_ignored: list) -> str:
+def _notes(local_only: list, local_credentials: list) -> str:
     """What differs in this checkout without being a mismatch by itself, for the verdict line."""
     parts = []
     if local_only:
         n = len(local_only)
         parts.append(f"{n} local-only file{'s' if n != 1 else ''} not present here: {', '.join(local_only)}")
-    if extra_ignored:
-        n = len(extra_ignored)
-        parts.append(f"{n} file{'s' if n != 1 else ''} here that git ignores and the receipt does not pin: "
-                     f"{', '.join(extra_ignored)}")
+    if local_credentials:
+        n = len(local_credentials)
+        parts.append(f"{n} local credential file{'s' if n != 1 else ''} not in the receipt: "
+                     f"{', '.join(local_credentials)}")
     return f" ({'; '.join(parts)})" if parts else ""

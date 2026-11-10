@@ -113,8 +113,10 @@ because re-running executes the project's commands. In another checkout, such as
 or `credential` that is missing there is listed as local-only, not a mismatch by itself, and the re-run decides:
 `CONFIRMED <hash> (1 local-only file not present here: .env).` A tracked pin that differs, or a local-only pin that is
 present but differs, is a `MISMATCH`; a credential file differs when its size or modification time does, so a copied
-or touched `.env` counts as changed. The answer is `CONFIRMED`, `MISMATCH` (naming what changed), `SUPERSEDED` (frozen
-again since), or `HASHES MATCH` (files match but nothing was re-run; not a confirmation).
+or touched `.env` counts as changed. A file the receipt does not pin is added, a `MISMATCH`, even when git ignores it
+(an ignored `unittest.py` can change a run); only a credential file is noted instead: `(1 local credential file not in
+the receipt: .env)`. The answer is `CONFIRMED`, `MISMATCH` (naming what changed), `SUPERSEDED` (frozen again since),
+or `HASHES MATCH` (files match but nothing was re-run; not a confirmation).
 
 ## Settings
 
@@ -135,6 +137,7 @@ Under `plugins.entries.contract-necromancer.settings`: `gate_budget_seconds` (25
 - **What tests can see.** Code under test runs inside the test runner and can tamper with it. A file in the
   project that changes how a test runs (a `unittest.py` that shadows Python's own, even one git ignores) can make a
   local run pass; it is pinned and listed in the receipt, and `verify --run` in a fresh clone, which lacks it, fails.
+  One that is only in the checkout that verifies is reported as added.
   Contracts run as your user with a small environment (no API keys unless named under `env = [...]`).
 - **Credential files are never opened.** Their pins hold size and modification time only, so an edit to `.env` that
   keeps both is not detected.

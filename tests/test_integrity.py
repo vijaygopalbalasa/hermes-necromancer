@@ -360,6 +360,44 @@ class CredentialFiles(unittest.TestCase):
             self.assertFalse(spec.is_credential(name), name)
 
 
+class VerifyExtras(unittest.TestCase):
+    """An unpinned file in the verifying checkout is ADDED (MISMATCH), ignored or not; only credential
+    files get a note instead, and they are never opened."""
+
+    def test_a_tarball_style_copy_with_an_ignored_shadow_module_is_a_mismatch(self):
+        g = GitWork(FIXED)
+        try:
+            (g.author / ".gitignore").write_text("unittest.py\n")
+            lock.freeze(g.author)
+            v = gate.evaluate(g.author, budget_s=120)
+            self.assertTrue(v.ok, v.problems)
+            copy = g.work / "tarball"
+            shutil.copytree(g.author, copy)
+            (copy / "unittest.py").write_text("raise SystemExit(0)\n")
+            out = verify.verify_receipt(copy / v.receipt_path.relative_to(g.author), run=True)
+            self.assertEqual(out.verdict, "MISMATCH", out.message)
+            self.assertIn("unittest.py", out.message)
+        finally:
+            g.cleanup()
+
+    def test_a_clone_with_its_own_env_file_is_confirmed_with_a_note(self):
+        g = GitWork(FIXED)
+        try:
+            (g.author / ".gitignore").write_text(".env\n")
+            lock.freeze(g.author)
+            v = gate.evaluate(g.author, budget_s=120)
+            clone = g.commit_and_clone()
+            (clone / ".env").write_text(SECRET + "\n")
+            with credential_opens(clone) as opened:
+                out = verify.verify_receipt(clone / v.receipt_path.relative_to(g.author), run=True)
+            self.assertEqual(opened, [])
+            self.assertEqual(out.verdict, "CONFIRMED", out.message)
+            self.assertIn("local credential file not in the receipt: .env", out.message)
+            self.assertNotIn("necro-test-value-8231", out.message)
+        finally:
+            g.cleanup()
+
+
 class DoneClaimsPerSentence(unittest.TestCase):
     def test_a_done_sentence_counts_whatever_the_reply_ends_with(self):
         for text in ["All done! Want me to add more tests?", "Fixed the rounding. Should I also update the docs?",
