@@ -252,7 +252,7 @@ def _freeze_found(root: Path, approvals: Approvals, command: str | None) -> tupl
         run = found.run
         if run is None and patterns:
             what = detect.describe(patterns, len(found.files))
-            return (f"Nothing locked: found test files in {root} ({what}), but not the command that runs them. "
+            return (f"Nothing locked: found test files in {root}, {what}, but not the command that runs them. "
                     "Type /necro freeze <your test command>, for example /necro freeze make test, to lock them "
                     "with it."), 1
     if not patterns:
@@ -269,11 +269,14 @@ def _freeze_found(root: Path, approvals: Approvals, command: str | None) -> tupl
         return f"Nothing locked: found your tests, {detect.describe(patterns, len(found.files))}, but {problem}. {fix}", 1
     text = detect.toml_text(run, patterns, found.outputs)
     path = root / SPEC_NAME
-    if not detect.write_new(path, text):
-        return f"Nothing locked: {SPEC_NAME} appeared in {root} meanwhile. Read it, then type /necro freeze.", 1
+    try:
+        if not detect.write_new(path, text):
+            return f"Nothing locked: {SPEC_NAME} appeared in {root} meanwhile. Read it, then type /necro freeze.", 1
+    except OSError as exc:
+        return f"Nothing locked: could not write {path} ({exc.strerror or exc}).", 1
     try:
         lk = freeze(root)
-    except SpecError as exc:
+    except (SpecError, OSError) as exc:
         detect.remove_if_same(path, text)
         return f"Could not freeze: {exc}", 1
     approvals.approve(root, lock_hash(lk))
@@ -303,7 +306,9 @@ def do_freeze(cwd, approvals: Approvals, command: str | None = None) -> tuple:
     digest = lock_hash(lk)
     approvals.approve(root, digest)
     files = len({f["path"] for c in lk["contracts"] for f in c["files"]})
-    lines = [f"Froze {len(lk['contracts'])} contracts ({files} files) in {root}, lock {digest[:12]}:"]
+    n = len(lk["contracts"])
+    lines = [f"Froze {n} contract{'' if n == 1 else 's'} ({files} file{'' if files == 1 else 's'}) in {root}, "
+             f"lock {digest[:12]}:"]
     lines += _contract_lines(lk)
     lines.append("From now on Hermes cannot finish coding work here while any of these fails, and edits to the "
                  f"frozen files are blocked. Commit {LOCK_REL} with the contracts.")

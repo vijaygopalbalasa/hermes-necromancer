@@ -230,7 +230,9 @@ def stamp(v: Verdict, text: str) -> str:
     text = text or ""
     if v.ok:
         rel = os.path.relpath(v.receipt_path, v.root) if v.receipt_path else ".necro/receipts"
-        return (f"{text.rstrip()}\n\n{LABEL}: all {len(v.results)} frozen acceptance contracts pass. "
+        passed = ("the frozen acceptance contract passes" if len(v.results) == 1
+                  else f"all {len(v.results)} frozen acceptance contracts pass")
+        return (f"{text.rstrip()}\n\n{LABEL}: {passed}. "
                 f"Receipt {v.receipt_hash[:12]}; anyone can re-check it with `hermes necro verify {rel}`.")
     fails = v.failing()
     if fails:

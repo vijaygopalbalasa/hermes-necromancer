@@ -372,6 +372,18 @@ class FreezeWithoutNecroToml(unittest.TestCase):
             self.assertIn("tests/x.py changed", text)
             self.assertEqual(f.state(), before)
 
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root can write anywhere")
+    def test_a_folder_it_cannot_write_gets_a_plain_answer(self):
+        with unittest_project() as f:
+            os.chmod(f.dir, 0o555)
+            try:
+                text, code = run(f, "freeze")
+            finally:
+                os.chmod(f.dir, 0o755)
+            self.assertNotEqual(code, 0)
+            self.assertIn("could not write", text)
+            self.assertFalse(os.path.lexists(f.path("necro.toml")))
+
     def test_a_dangling_necro_toml_link_is_not_written_through(self):
         with unittest_project() as f:
             f.link("necro.toml", "elsewhere.toml")
@@ -536,6 +548,23 @@ class StatusBeforeAnything(unittest.TestCase):
                 plugin.cli_run(argparse.Namespace(action="status", receipt=None, dir=str(f.dir), run=False))
             self.assertIn("Type /necro freeze to lock them.", shown.getvalue())
             self.assertEqual(f.state(), before)
+
+
+class OneContractWording(unittest.TestCase):
+    """A generated lock has one contract, so its replies use the singular."""
+
+    def test_the_stamp_and_a_later_freeze_say_one_contract(self):
+        with unittest_project() as f:
+            ctx = FakeCtx(f.dir)
+            load_plugin().register(ctx)
+            ctx.commands["necro"]("freeze")
+            f.write("calc.py", CALC_FIXED)
+            ctx.hooks["pre_verify"](session_id="s", platform="cli", model="m", coding=True, attempt=0,
+                                    final_response="Fixed.", changed_paths=[str(f.path("calc.py"))])
+            out = ctx.hooks["transform_llm_output"](response_text="Fixed.", session_id="s", model="m", platform="cli")
+            self.assertIn("Contract Necromancer: the frozen acceptance contract passes. Receipt", out)
+            ctx.commands["necro"]("unfreeze")
+            self.assertIn("Froze 1 contract (1 file) in", ctx.commands["necro"]("freeze"))
 
 
 class GeneratedToml(unittest.TestCase):

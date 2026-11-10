@@ -5,10 +5,20 @@ work while one fails, and ends a passing reply with a receipt anyone can re-chec
 
 ![In a real run Hermes said "The fix is complete" while frozen test C4 still failed; the plugin refused that done](docs/img/not-done.png)
 
-```
-hermes plugins install vijaygopalbalasa/hermes-necromancer --enable
-hermes necro demo
-```
+## Quick start
+
+1. Install it:
+
+   ```
+   hermes plugins install vijaygopalbalasa/hermes-necromancer --enable
+   ```
+
+2. In your project, type **`/necro freeze`** in the Hermes chat.
+
+That finds your tests and the command that runs them (pytest, unittest, `npm test`, `go test` or `cargo test`), locks
+the test files by hash, and from then on Hermes can't say "done" until that command passes, and can't edit those files.
+
+To watch the whole story first, with no API key: `hermes necro demo`.
 
 ## How this differs
 
@@ -43,30 +53,50 @@ plugin installs under the name `contract-necromancer`.
 
 ## Use it in your project
 
-1. Write `necro.toml` next to your code. Each contract is one frozen test: a command that exits 0 when the work is
-   right, plus the files it freezes:
+Type **`/necro freeze`** in the Hermes chat, in your project's folder. With no `necro.toml` there, it looks for test
+files (`tests/`, `test/`, `__tests__/`, `test_*.py`, `*_test.py`, `conftest.py`, `*.test.*`, `*.spec.*`, `*_test.go`,
+`testdata/`) and for the command that runs them, in this order: pytest (named in your settings, a `conftest.py`, or a
+test file that uses it), unittest, `npm test` (when `package.json` has a real test script), `go test ./...` and
+`cargo test`. It writes `necro.toml` with one contract, C1, locks it, and says what it locked:
 
-   ```toml
-   [[contract]]
-   id = "C1"
-   says = "Shares add up to the total"
-   run = "python3 -m pytest tests/acceptance/test_split.py -q"
-   files = ["tests/acceptance/**"]
-   ```
+```
+Locked your tests: `python3 -m pytest -q` must pass. Frozen: tests/** (12 files). Hermes can't say "done" until
+this passes, and it can't edit these files. Undo: /necro unfreeze. Change what counts as done: edit necro.toml,
+then /necro freeze. See where it stands: /necro check.
+```
 
-   Any language works: `npm test -- tests/acceptance`, `cargo test --test acceptance`, `go test ./acceptance/...`.
-   Freeze the whole folder with a glob, so a new file there (a `conftest.py`, an `__init__.py`) counts as tampering.
-   A frozen folder cannot hold a credential file (a `.env`, a `*.pem` or `*.key` fixture), because those are never
-   opened. If your tests write files (reports, coverage), list them: `outputs = ["reports/*.xml"]`. Hermes can draft
-   `necro.toml` for you before you freeze it.
-2. Read the contracts, then type **`/necro freeze`** in the Hermes chat. Freezing, approving and unfreezing are a
-   person's acts and live in the slash command, because the agent cannot type into your chat.
-3. Work with Hermes as usual. Commit `.necro/lock.json` and `.necro/receipts/` with your contracts.
+If it finds no test files, can't tell how to run them, or the command can't run here (say `python3` cannot import
+pytest), it locks nothing and says what to do instead. To use your own test command, put it after freeze:
+`/necro freeze npm run test:unit`. A script the command names, such as `./run-tests.sh`, is locked with it.
+Freezing, approving and unfreezing are a person's acts and live in the slash command, because the agent cannot type
+into your chat. Work with Hermes as usual, and commit `necro.toml`, `.necro/lock.json` and `.necro/receipts/` with
+your code.
+
+### Custom contracts
+
+For more than one check, or to choose exactly what is frozen, write `necro.toml` yourself before you type
+`/necro freeze`. Each contract is one frozen test: a command that exits 0 when the work is right, plus the files it
+freezes:
+
+```toml
+[[contract]]
+id = "C1"
+says = "Shares add up to the total"
+run = "python3 -m pytest tests/acceptance/test_split.py -q"
+files = ["tests/acceptance/**"]
+```
+
+Any language works: `npm test -- tests/acceptance`, `cargo test --test acceptance`, `go test ./acceptance/...`.
+Freeze the whole folder with a glob, so a new file there (a `conftest.py`, an `__init__.py`) counts as tampering.
+A frozen folder cannot hold a credential file (a `.env`, a `*.pem` or `*.key` fixture), because those are never
+opened. If your tests write files (reports, coverage), list them: `outputs = ["reports/*.xml"]`. Hermes can draft
+`necro.toml` for you; read it, then type `/necro freeze`.
 
 | Command | What it does |
 |---|---|
-| `/necro` or `/necro status` | What is frozen here, and the latest receipt |
-| `/necro freeze` | Freeze the contracts in `necro.toml` by hash |
+| `/necro` or `/necro status` | What is frozen here, and the latest receipt; before a freeze, the tests it would lock |
+| `/necro freeze` | Lock the contracts in `necro.toml` by hash; with no `necro.toml`, find the tests and write one first |
+| `/necro freeze <command>` | With no `necro.toml`: lock the tests it finds, with your command as the one that must pass |
 | `/necro approve` | Accept a lock someone else froze and committed, after reading it |
 | `/necro unfreeze` | Remove the lock so the contracts can change (receipts stay) |
 | `/necro check` | Run every frozen contract now; write a receipt if all pass |
@@ -147,6 +177,10 @@ Under `plugins.entries.contract-necromancer.settings`: `gate_budget_seconds` (25
   whether a Hermes process started the shell. Any of them refuses.
 - **Bounded.** After 3 nudges the reply goes out, stamped `Not done.` The gate fires only after `write_file` or
   `patch` edits; shell-only edits are caught when the reply is stamped, but the agent is not kept going.
+- **`/necro freeze` locks test files, not settings.** Without a `necro.toml`, it freezes the test files it finds, not
+  `package.json`, `pyproject.toml`, `pytest.ini`, `setup.cfg` or `Cargo.toml`, which can change which tests run (an
+  edited `scripts.test`, or pytest `addopts`). Such an edit is pinned in the receipt but not blocked. To lock one, add
+  it to `files` in `necro.toml` and type `/necro freeze` again.
 - **What tests can see.** Code under test runs inside the test runner and can tamper with it. A file in the
   project that changes how a test runs (a `unittest.py` that shadows Python's own, even one git ignores) can make a
   local run pass; it is pinned and listed in the receipt, and `verify --run` in a fresh clone, which lacks it, fails.
@@ -164,7 +198,11 @@ Under `plugins.entries.contract-necromancer.settings`: `gate_budget_seconds` (25
 
 It runs the commands in your frozen `necro.toml` with your user's permissions and reads your project's files to hash
 them, except credential files such as `.env`, which it never opens: it records only their size and file times. Links
-are never opened or followed; it records their text. It writes `.necro/` in the project and, under
+are never opened or followed; it records their text. When you type `/necro freeze` where there is no `necro.toml`, it
+reads the folder's file list, `package.json`, `pyproject.toml`, `setup.cfg`, `tox.ini`, `requirements*.txt` and the
+first lines of Python test files (never through a link, never a credential file), looks the test command's program
+up on PATH (for pytest it runs `python3 -c "import pytest"` in an empty folder), and writes `necro.toml`; `/necro
+status` reads the same files. It writes `.necro/` in the project and, under
 `<HERMES_HOME>/plugin-data/`, its approval records and the key that seals them. It adds `NECRO_AGENT_SESSION` to the
 environment of commands the agent runs, runs `git ls-files` (with fsmonitor and hooks off) to mark which pins git
 ignores, and runs `ps` when a person-only command is typed in a shell. No network calls, no telemetry, no credentials
@@ -173,15 +211,17 @@ stored, no background processes.
 ## Tests
 
 ```
-python3 -m unittest discover -s tests                        # 256 tests, about 90 s
+python3 -m unittest discover -s tests                        # 309 tests, about 90 s
 python3 tests/e2e/run_in_hermes.py --hermes $(which hermes)    # the real Hermes agent loop
 ```
 
 The second runs `hermes chat` in a throwaway Hermes home against a local scripted stand-in for a model (no API key),
-so it checks the plugin's wiring in Hermes's real agent loop, not how a particular model behaves. Its ten checks
+so it checks the plugin's wiring in Hermes's real agent loop, not how a particular model behaves. Its eighteen checks
 include: the first "Done!" is refused; `write_file` and `execute_code` writes to the frozen contract are blocked;
 freezing from a script is refused while `/necro freeze` works; a spliced approve command from the agent's own shell
-is refused; the real fix gets a receipt that verifies.
+is refused; the real fix gets a receipt that verifies. Then, in a fresh project with only code and unittest tests
+and no `necro.toml`, one `/necro freeze` locks the tests, a freeze from a script writes nothing, and the gate holds
+the same way.
 
 ## License
 

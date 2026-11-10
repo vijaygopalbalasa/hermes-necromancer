@@ -206,7 +206,7 @@ def main() -> int:
         ("Zero config: the write_file to the locked test was blocked", bool(fresh_seen["blocked"])),
         ("Zero config: the locked test file is unchanged", test_intact),
         ("Zero config: the real fix got a receipt in the final reply",
-         bool(fresh_seen["receipts"]) and "frozen acceptance contracts pass" in fresh_turn.stdout),
+         bool(fresh_seen["receipts"]) and "the frozen acceptance contract passes. Receipt" in fresh_turn.stdout),
         ("Zero config: hermes necro verify says CONFIRMED", "CONFIRMED" in fresh_verify.stdout),
     ]
     print("What the model was told when it first said Done:")
