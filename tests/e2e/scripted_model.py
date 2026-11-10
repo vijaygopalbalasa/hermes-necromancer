@@ -2,8 +2,9 @@
 
 It plays a careless coding agent on demo/tip_split so the real Hermes loop can be exercised without
 an API key: it reads tipsplit.py, writes a half fix and says "Done!". When Hermes hands back a
-Contract Necromancer note it tries to loosen the failing contract, and once that is blocked it writes
-the real fix and finishes. Every request it receives is appended to a JSONL log for the assertions.
+Contract Necromancer note it tries to loosen the failing contract (NECRO_E2E_CONTRACT, by default
+contracts/test_fair.py), and once that is blocked it writes the real fix and finishes. Every request
+it receives is appended to a JSONL log for the assertions.
 
     python3 scripted_model.py --port 0 --log /tmp/requests.jsonl   (prints the port it bound)
 """
@@ -81,17 +82,18 @@ def decide(body: dict) -> dict:
         for n, a in calls
     )
     nudged = any(m.get("role") == "user" and "[Contract Necromancer]" in text_of(m) for m in after)
+    contract = os.environ.get("NECRO_E2E_CONTRACT") or "contracts/test_fair.py"
     if not any(n == "read_file" for n, _ in calls):
         return {"tool": "read_file", "args": {"path": "tipsplit.py"}}
     if not wrote("tipsplit.py", "shares[0] +="):
         return {"tool": "write_file", "args": {"path": "tipsplit.py", "content": HALF_FIX}}
     if not nudged:
         return {"text": FIRST_CLAIM}
-    if not wrote("contracts/test_fair.py", "test_relaxed"):
-        return {"tool": "write_file", "args": {"path": "contracts/test_fair.py", "content": RELAXED_CONTRACT}}
+    if not wrote(contract, "test_relaxed"):
+        return {"tool": "write_file", "args": {"path": contract, "content": RELAXED_CONTRACT}}
     if not any(n == "execute_code" for n, _ in calls):
         # Code that writes the frozen contract; Hermes's own approval is set to approve, so only the plugin stops it.
-        return {"tool": "execute_code", "args": {"code": "open('contracts/test_fair.py', 'w').write('# relaxed')\n"}}
+        return {"tool": "execute_code", "args": {"code": f"open({contract!r}, 'w').write('# relaxed')\n"}}
     hermes, home = os.environ.get("NECRO_E2E_HERMES"), os.environ.get("NECRO_E2E_HOME")
     real = os.path.realpath(os.path.expanduser("~/.hermes"))
     safe_home = home and os.path.realpath(home) != real and not os.path.realpath(home).startswith(real + "/")

@@ -13,6 +13,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from . import detect
 from .canon import utc_now
 from .gate import APPROVAL_TAMPERED, evaluate
 from .lock import LOCK_REL, LockError, drift, find_root, freeze, lock_hash, lock_path, read_lock
@@ -25,8 +26,10 @@ PERSON_CHECK_BUDGET = 900.0
 USAGE = """Contract Necromancer: Hermes cannot call coding work done while a frozen acceptance contract fails.
 Freeze, approve and unfreeze with /necro inside Hermes; from a shell they refuse unless a person is clearly typing.
 
-  status            what is frozen here, and the latest receipt
-  freeze            freeze the contracts in necro.toml by hash (type /necro freeze in the Hermes chat)
+  status            what is frozen here and the latest receipt; before a freeze, the tests it would lock
+  freeze [command]  lock your tests by hash (type /necro freeze in the Hermes chat). With no necro.toml it
+                    finds them and their command (pytest, unittest, npm test, go test, cargo test), writes
+                    necro.toml and locks it; put your own test command after freeze to use that instead
   approve           accept a lock someone else froze and committed (type /necro approve in the chat)
   unfreeze          remove the lock so contracts can be edited (type /necro unfreeze in the chat)
   check             run every frozen contract now; write a receipt if all pass
@@ -166,8 +169,7 @@ def status(cwd, approvals: Approvals) -> tuple:
                         "Read them, then type /necro freeze in Hermes."), 0
             except SpecError as exc:
                 return f"{draft / SPEC_NAME} is not ready to freeze: {exc}", 1
-        return (f"Nothing is frozen at {Path(cwd).resolve()} (no {LOCK_REL} here or above). Write {SPEC_NAME} with "
-                "your acceptance contracts, then run /necro freeze."), 0
+        return nothing_set_up(cwd), 0
     try:
         lk = read_lock(root)
     except LockError as exc:
@@ -190,10 +192,110 @@ def status(cwd, approvals: Approvals) -> tuple:
     return "\n".join(lines), 0
 
 
-def do_freeze(cwd, approvals: Approvals) -> tuple:
+TOML_EXAMPLE = """    [[contract]]
+    id = "C1"
+    says = "Your tests pass"
+    run = {run}
+    files = ["path/to/your/tests/**"]"""
+
+
+def nothing_set_up(cwd) -> str:
+    """One line for /necro status before anything is frozen: what /necro freeze would lock here."""
+    here = Path(cwd).expanduser().resolve()
+    found = detect.detect(here, budget_s=5.0)
+    if found.problem:
+        return f"Nothing is locked here: {found.problem}. Open Hermes in your project's folder, then type /necro freeze."
+    what = detect.describe(found.patterns, len(found.files)) if found.patterns else None
+    if found.run and what:
+        return f"Nothing is locked in {here} yet. Found your tests: {what}, run with `{found.run}`. Type /necro freeze to lock them."
+    if what:
+        return (f"Nothing is locked in {here} yet. Found test files ({what}) but not the command that runs them. "
+                "Type /necro freeze <your test command> to lock them.")
+    if found.run:
+        return (f"Nothing is locked in {here} yet. It looks like a {detect.KINDS[found.kind]} project (`{found.run}`), "
+                "but it has no test files to lock. Type /necro help to see how to lock your tests.")
+    return (f"Nothing is locked in {here} yet, and no tests were found here. Type /necro freeze <your test command>, "
+            "or /necro help.")
+
+
+def _no_tests(found, command: str | None) -> str:
+    example = TOML_EXAMPLE.format(run=json.dumps(command or found.run or "python3 -m pytest -q"))
+    if command:
+        return (f"Nothing locked: `{command}` names no file in {found.root}, and no test files were found here "
+                f"(looked for {detect.LOOKED_FOR}). Write {SPEC_NAME} like this, then type /necro freeze:\n{example}")
+    seen = (f" It looks like a {detect.KINDS[found.kind]} project (`{found.run}`), but there is no test file to lock."
+            if found.run else "")
+    return (f"Nothing locked: no test files in {found.root} (looked for {detect.LOOKED_FOR}).{seen}\n"
+            "Two ways forward:\n"
+            "  - type /necro freeze <your test command>; it locks the test files it finds and any file here the "
+            "command names, such as a test script\n"
+            f"  - or write {SPEC_NAME} like this, then type /necro freeze:\n{example}")
+
+
+def _freeze_found(root: Path, approvals: Approvals, command: str | None) -> tuple:
+    """/necro freeze where there is no necro.toml: find the tests and their command (or use the person's),
+    write necro.toml, freeze it. All or nothing: when it cannot lock, it changes nothing."""
+    if os.path.lexists(root / SPEC_NAME):
+        return (f"Could not freeze: {root / SPEC_NAME} is a link, and Contract Necromancer never follows links. Put "
+                f"a regular {SPEC_NAME} there, or remove the link and type /necro freeze again."), 1
+    found = detect.detect(root)
+    if found.problem:
+        return f"Nothing locked: {found.problem}. Open Hermes in your project's folder and type /necro freeze there.", 1
+    patterns = list(found.patterns)
+    if command:
+        try:
+            run = detect.as_run(command)
+        except ValueError as exc:
+            return f"Nothing locked: `{command}` cannot be used as a test command ({exc}).", 1
+        patterns += [rel for rel in detect.named_files(root, command, found.listing) if rel not in found.files]
+    else:
+        run = found.run
+        if run is None and patterns:
+            what = detect.describe(patterns, len(found.files))
+            return (f"Nothing locked: found test files in {root} ({what}), but not the command that runs them. "
+                    "Type /necro freeze <your test command>, for example /necro freeze make test, to lock them "
+                    "with it."), 1
+    if not patterns:
+        return _no_tests(found, command), 1
+    problem = detect.runner_problem(run, root)
+    if problem:
+        if "import pytest" in problem:
+            venv = " /necro freeze .venv/bin/python -m pytest -q" if os.path.lexists(root / ".venv/bin/python") else \
+                " /necro freeze <your test command>"
+            fix = ("Start Hermes where pytest is installed (for example with your virtualenv active), or type"
+                   + venv + ".")
+        else:
+            fix = "Install it, or type /necro freeze <your test command>."
+        return f"Nothing locked: found your tests, {detect.describe(patterns, len(found.files))}, but {problem}. {fix}", 1
+    text = detect.toml_text(run, patterns, found.outputs)
+    path = root / SPEC_NAME
+    if not detect.write_new(path, text):
+        return f"Nothing locked: {SPEC_NAME} appeared in {root} meanwhile. Read it, then type /necro freeze.", 1
+    try:
+        lk = freeze(root)
+    except SpecError as exc:
+        detect.remove_if_same(path, text)
+        return f"Could not freeze: {exc}", 1
+    approvals.approve(root, lock_hash(lk))
+    count = len({f["path"] for c in lk["contracts"] for f in c["files"]})
+    reply = (f"Locked your tests: `{run}` must pass. Frozen: {detect.describe(patterns, count)}. Hermes can't say "
+             "\"done\" until this passes, and it can't edit these files. Undo: /necro unfreeze. Change what counts as "
+             "done: edit necro.toml, then /necro freeze. See where it stands: /necro check.")
+    if approvals.store is None:
+        reply += " Now type /necro approve in the Hermes chat, so Hermes accepts this lock."
+    return reply, 0
+
+
+def do_freeze(cwd, approvals: Approvals, command: str | None = None) -> tuple:
     root = spec_root(cwd)
-    if root is None or not (root / SPEC_NAME).is_file():
-        return f"Could not freeze: no {SPEC_NAME} in {Path(cwd).resolve()} or above.", 1
+    if root is None:
+        return _freeze_found(Path(cwd).expanduser().resolve(), approvals, command)
+    if not (root / SPEC_NAME).is_file():
+        return (f"Could not freeze: {root} has a lock ({LOCK_REL}) but no {SPEC_NAME}. Put {SPEC_NAME} back (for "
+                "example from git), or type /necro unfreeze to start over."), 1
+    if command:
+        return (f"Nothing changed: {root / SPEC_NAME} already says what counts as done here. To use `{command}`, "
+                f"change run in {SPEC_NAME}, then type /necro freeze."), 1
     try:
         lk = freeze(root)
     except SpecError as exc:
@@ -391,7 +493,9 @@ def dispatch(raw: str, cwd, approvals: Approvals, cache=None, from_shell: bool =
     if sub in ("status", "show"):
         return status(cwd, approvals)
     if sub == "freeze":
-        return do_freeze(cwd, approvals)
+        after = re.match(r"\s*freeze\b(.*)$", raw or "", re.IGNORECASE | re.DOTALL)
+        command = (after.group(1) if after else shlex.join(rest)).strip()
+        return do_freeze(cwd, approvals, command or None)
     if sub == "unfreeze":
         return do_unfreeze(cwd, approvals)
     if sub == "approve":

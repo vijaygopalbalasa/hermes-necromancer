@@ -261,7 +261,8 @@ class NecroPlugin:
             if orphans:
                 return json.dumps({"frozen": True, "error": self._orphan_problem(orphans)})
             return json.dumps({"frozen": False, "message": "No frozen acceptance contracts in this project "
-                               "(no .necro/lock.json). Nothing gates done here."})
+                               "(no .necro/lock.json). Nothing gates done here. A person can lock the project's "
+                               "tests by typing /necro freeze in the chat."})
         try:
             lk = lock.read_lock(root)
         except lock.LockError as exc:
