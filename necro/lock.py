@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -24,6 +25,8 @@ def lock_path(root) -> Path:
 def build_lock(root, now: str | None = None, files=None) -> dict:
     """The lock that freezing the project now would write, without writing it."""
     root = Path(root).resolve()
+    if (root / SPEC_NAME).is_symlink():
+        raise SpecError(f"{SPEC_NAME} is a link; Contract Necromancer never follows links, so freeze a regular {SPEC_NAME}")
     sp = load_spec(root)
     if files is None:
         files = walk_files(root)
@@ -165,8 +168,10 @@ def drift(root, lk: dict, files=None, deadline=None) -> Drift:
         pinned = {f["path"]: f["sha256"] for f in c.get("files", [])}
         for rel, digest in pinned.items():
             now = hash_file(root / rel, deadline)
-            if now is None:
+            if now is None and not os.path.lexists(root / rel):
                 reasons.append(f"missing: {rel}")
+            elif now is None:
+                reasons.append(f"changed since freeze: {rel}")  # now a link, or unreadable
             elif now != digest:
                 reasons.append(f"changed since freeze: {rel}")
         patterns = c.get("patterns") or list(pinned)

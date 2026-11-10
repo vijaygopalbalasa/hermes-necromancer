@@ -212,7 +212,7 @@ class R2ApprovalStore(unittest.TestCase):
         with Project(code=FIXED) as p:
             ctx, _ = ctx_for(p)
             ctx.commands["necro"]("freeze")
-            (Path(ctx.state.path).parent / "approvals.key").unlink()
+            (Path(ctx.state.path).parent / "approvals.hmac").unlink()
             self.assertEqual(fire_pre_verify(ctx, [p.dir / "tipsplit.py"])["action"], "continue")
 
 

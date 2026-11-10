@@ -16,6 +16,7 @@ from unittest import mock
 from helpers import BUGGY, FIXED, REPO, Project
 
 from necro import canon, commands, gate, lock, receipts, spec, verify
+from necro import demo
 
 SECRET = "DUMMY_TOKEN_FOR_THIS_TEST_ONLY=necro-test-value-8231"
 
@@ -30,7 +31,7 @@ def _audit(event, args):
     if under is None or event != "open" or not args or not isinstance(args[0], (str, bytes, os.PathLike)):
         return
     path = os.fsdecode(args[0])
-    if not os.path.abspath(path).startswith(under):
+    if not os.path.realpath(path).startswith(under):
         return
     if spec.is_credential(os.path.basename(path)) or spec.is_credential(os.path.basename(os.path.realpath(path))):
         _AUDIT["opened"].append(path)
@@ -256,23 +257,100 @@ class CredentialFiles(unittest.TestCase):
         self.assertFalse(v.ok)
         self.assertTrue(any(".env" in x for x in v.problems), v.problems)
 
-    def test_a_link_is_hashed_like_any_file_whatever_it_is_named_or_points_at(self):
-        # Review, Nov 10 late: credential treatment is only for a regular file with a credential name of its own.
+    def test_a_link_is_pinned_by_its_text_and_never_opened_whatever_it_points_at(self):
+        # Review, Nov 11: a link is never opened or followed; its pin is the text os.readlink gives.
         with Project(code=FIXED) as p:
             p.write(".env", SECRET + "\n")
             os.symlink(".env", p.path("settings.txt"))
             os.symlink(".env", p.path(".env.local"))
+            os.symlink("/nowhere/at/all", p.path("broken"))
+            os.symlink("contracts", p.path("tests-link"))
             self.assertFalse(canon.is_credential_path(p.path("settings.txt")))
             self.assertFalse(canon.is_credential_path(p.path(".env.local")))
             self.assertTrue(canon.is_credential_path(p.path(".env")))
+            with credential_opens(p.dir) as opened:
+                lock.freeze(p.dir)
+                v = gate.evaluate(p.dir, budget_s=60)
+                self.assertTrue(v.ok, v.problems)
+                out = verify.verify_receipt(v.receipt_path, run=True)
+            self.assertEqual(opened, [])
+            self.assertEqual(out.verdict, "CONFIRMED", out.message)
+            pins = pins_of(v)
+            self.assertEqual(pins["settings.txt"], {"path": "settings.txt", "link": ".env"})
+            self.assertEqual(pins[".env.local"], {"path": ".env.local", "link": ".env"})
+            self.assertEqual(pins["broken"], {"path": "broken", "link": "/nowhere/at/all"})
+            self.assertEqual(pins["tests-link"], {"path": "tests-link", "link": "contracts"})
+            self.assertTrue(pins[".env"].get("credential"))
+
+    def test_a_link_that_changes_appears_or_is_frozen_is_a_change_like_any_other(self):
+        with Project(code=FIXED) as p:
+            os.symlink("tipsplit.py", p.path("alias.py"))
+            p.write("contracts/test_refuses_zero.py",
+                    "import os, unittest\nclass T(unittest.TestCase):\n    def test_w(self):\n"
+                    "        os.remove('alias.py'); os.symlink('necro.toml', 'alias.py')\n")
+            lock.freeze(p.dir)
+            v = gate.evaluate(p.dir, budget_s=60)
+            self.assertFalse(v.ok)
+            self.assertTrue(any("alias.py" in x for x in v.problems), v.problems)
+        with Project(code=FIXED) as p:
+            os.symlink("tipsplit.py", p.path("alias.py"))
             lock.freeze(p.dir)
             v = gate.evaluate(p.dir, budget_s=60)
             self.assertTrue(v.ok, v.problems)
-            pins = pins_of(v)
-            for name in ("settings.txt", ".env.local"):
-                self.assertNotIn("credential", pins[name], name)
-                self.assertEqual(len(pins[name]["sha256"]), 64, name)
-            self.assertTrue(pins[".env"].get("credential"))
+            os.remove(p.path("alias.py"))
+            os.symlink("necro.toml", p.path("alias.py"))
+            out = verify.verify_receipt(v.receipt_path, run=True)
+            self.assertEqual(out.verdict, "MISMATCH", out.message)
+            self.assertIn("Files changed: alias.py.", out.message)
+            os.remove(p.path("alias.py"))
+            os.symlink("tipsplit.py", p.path("alias.py"))
+            os.symlink("tipsplit.py", p.path("extra.py"))
+            out = verify.verify_receipt(v.receipt_path, run=True)
+            self.assertEqual(out.verdict, "MISMATCH", out.message)
+            self.assertIn("Files added: extra.py.", out.message)
+        with Project(code=FIXED) as p:
+            os.symlink("test_fair.py", p.path("contracts/test_fair_link.py"))
+            p.write("necro.toml", p.read("necro.toml").replace('files = ["contracts/test_fair.py"]',
+                                                                'files = ["contracts/**"]'))
+            with self.assertRaises(spec.SpecError) as caught:
+                lock.freeze(p.dir)
+            self.assertIn("contracts/test_fair_link.py", str(caught.exception))
+            self.assertIn("link", str(caught.exception))
+
+    def test_committed_links_are_not_marked_as_ignored_by_git(self):
+        g = GitWork(FIXED)
+        try:
+            os.symlink("tipsplit.py", g.author / "alias.py")
+            os.symlink("contracts", g.author / "tests-link")
+            lock.freeze(g.author)
+            g.git("add", "-A")
+            g.git("commit", "-qm", "links")
+            v = gate.evaluate(g.author, budget_s=120)
+            self.assertTrue(v.ok, v.problems)
+            for name in ("alias.py", "tests-link"):
+                self.assertNotIn("ignored", pins_of(v)[name], name)
+        finally:
+            g.cleanup()
+
+    def test_the_plugins_own_key_has_no_credential_name_and_the_old_one_moves_unread(self):
+        from necro import commands as cmd
+        state = demo._State()
+        folder = Path(state.path).parent
+        old_key = os.urandom(32)
+        (folder / "approvals.key").write_text(old_key.hex())
+        at, digest, root = "2026-11-10T00:00:00Z", "ab" * 32, "/some/project"
+        state.set(cmd.Approvals.KEY, {root: {"lock": digest, "at": at, "mac": cmd.Approvals._mac(old_key, root, digest, at)}})
+        with credential_opens(folder) as opened:
+            mapping = cmd.Approvals(state).mapping()
+        self.assertEqual(opened, [])
+        self.assertEqual(mapping[root], digest)
+        self.assertFalse((folder / "approvals.key").exists())
+        self.assertEqual((folder / "approvals.hmac").read_text().strip(), old_key.hex())
+        self.assertFalse(spec.is_credential("approvals.hmac"))
+        fresh = demo._State()
+        cmd.Approvals(fresh).approve(Path(tempfile.gettempdir()), "cd" * 64)
+        self.assertTrue((Path(fresh.path).parent / "approvals.hmac").is_file())
+        self.assertFalse((Path(fresh.path).parent / "approvals.key").exists())
 
     def test_names_python_can_import_or_run_never_get_credential_treatment(self):
         for name in (".env.py", ".env.pth", "conftest.pem", "Conftest.KEY", "sitecustomize.key", "usercustomize.pem",

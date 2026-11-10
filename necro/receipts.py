@@ -54,7 +54,7 @@ def git_listing(root: Path) -> list | None:
         if not name:
             continue
         try:
-            if stat.S_ISREG(os.stat(root / name).st_mode):
+            if os.path.islink(root / name) or stat.S_ISREG(os.stat(root / name).st_mode):
                 files.append(name)
         except OSError:
             continue
@@ -99,10 +99,12 @@ def git_ignored(root: Path, rels) -> set:
 
 
 def pin_entry(rel: str, value, ignored: bool) -> dict:
-    """One pin, from canon.file_pin: a SHA-256, or for a credential file, which is never opened, its
-    size, modification time, inode and change time, marked ``credential``. ``ignored`` and ``credential`` mark files
-    another checkout may not have."""
-    if isinstance(value, dict):
+    """One pin, from canon.file_pin: a SHA-256; for a link, which is never opened or followed, its text;
+    for a credential file, which is never opened, its size, modification time, inode and change time,
+    marked ``credential``. ``ignored`` and ``credential`` mark files another checkout may not have."""
+    if isinstance(value, dict) and "link" in value:
+        entry = {"path": rel, "link": value["link"]}
+    elif isinstance(value, dict):
         entry = {"path": rel, "credential": True, **{k: value.get(k) for k in ("size", "mtimeNs", "ino", "ctimeNs")}}
     else:
         entry = {"path": rel, "sha256": value}

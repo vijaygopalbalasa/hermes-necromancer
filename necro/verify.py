@@ -117,7 +117,8 @@ def verify_receipt(receipt_file, cwd=None, budget_s: float | None = None, approv
             local_only.append(rel)
         elif credential and entry.get("credential") and now["size"] == entry.get("size"):
             uncompared.append(rel)
-        elif credential or entry.get("credential") or now != entry.get("sha256"):
+        elif credential or entry.get("credential") or now != ({"link": entry.get("link")} if "link" in entry
+                                                               else entry.get("sha256")):
             changed.add(rel)
     try:
         present = set(source_files(root, lk))

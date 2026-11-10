@@ -74,10 +74,10 @@ def _sha256(path, deadline=None) -> str | None:
 
 
 def hash_file(path, deadline=None) -> str | None:
-    """SHA-256 of a regular file's bytes (a link is followed), or None when it is missing, not a
-    regular file (a FIFO, socket or device would block or never end), unreadable, or a credential
-    file, which is never opened and so never matches a hash."""
-    return None if is_credential_path(path) else _sha256(path, deadline)
+    """SHA-256 of a regular file's bytes, or None when it is missing, not a regular file (a FIFO, socket
+    or device would block or never end), unreadable, a link (never opened or followed) or a credential
+    file (never opened); neither of the last two ever matches a hash."""
+    return None if os.path.islink(path) or is_credential_path(path) else _sha256(path, deadline)
 
 
 def stat_pin(path) -> dict | None:
@@ -93,8 +93,14 @@ def stat_pin(path) -> dict | None:
 
 
 def file_pin(path, deadline=None):
-    """What a receipt pins for a file: the SHA-256 of its bytes or, for a credential file, which is
-    never opened, {"size", "mtimeNs", "ino", "ctimeNs"}. None when it is missing."""
+    """What a receipt pins for a file: {"link": its text} for a link, which is never opened or followed,
+    whatever it points to; {"size", "mtimeNs", "ino", "ctimeNs"} for a credential file, which is never
+    opened; else the SHA-256 of its bytes. None when it is missing."""
+    if os.path.islink(path):
+        try:
+            return {"link": os.readlink(path)}
+        except (OSError, ValueError):
+            return None
     return stat_pin(path) if is_credential_path(path) else _sha256(path, deadline)
 
 

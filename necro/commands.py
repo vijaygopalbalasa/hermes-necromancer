@@ -48,12 +48,14 @@ class Approvals:
 
     KEY = "approved_roots"
     LIMIT = 500
+    KEY_FILE = "approvals.hmac"  # not a credential-looking name: the plugin never reads one (catalog rule 11)
+    OLD_KEY_FILE = "approvals.key"  # its name before Nov 11, moved on first use without being opened
 
     def __init__(self, store=None):
         self.store = store
         self.known: set = set()  # folders seen approved in this process, kept even if the store loses them
         try:
-            self.key_path = Path(store.path).parent / "approvals.key" if store is not None else None
+            self.key_path = Path(store.path).parent / self.KEY_FILE if store is not None else None
         except Exception:
             self.key_path = None
         self._memory_key = None
@@ -67,6 +69,12 @@ class Approvals:
             if self._memory_key is None and create:
                 self._memory_key = secrets.token_bytes(32)
             return self._memory_key
+        old = self.key_path.with_name(self.OLD_KEY_FILE)
+        if not os.path.lexists(self.key_path) and os.path.lexists(old):
+            try:
+                os.rename(old, self.key_path)
+            except OSError:
+                pass
         try:
             return bytes.fromhex(self.key_path.read_text().strip())
         except (OSError, ValueError):

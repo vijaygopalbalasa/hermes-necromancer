@@ -101,16 +101,16 @@ A receipt is `.necro/receipts/<sha256>.json`, named by the hash of its own conte
 file, each contract's result and every other project file by SHA-256, whether git ignores it or not, because an
 ignored file can change a run. Pins that git ignores are marked `ignored`. Credential files (`.env`, `.env.*`, keys,
 `.netrc` and the like, by their own name) are never opened, not even to hash them: their pin, marked `credential`,
-holds only that the file is there, its size, modification time, inode and change time. A link is never treated as a
-credential file, whatever its name or target: it is hashed like any file, so a credential file behind a link is read
-to hash it (never stored, logged or printed). Neither is a name Python can import or run (`*.py`, `*.pth`,
-`conftest*`, `sitecustomize*`, `usercustomize*`). A contract cannot freeze a credential file. Never walked, pinned or
-checked: version control and necro's own (`.git`, `.hg`, `.svn`, `.necro`), test-tool caches (`__pycache__`,
-`.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.tox`, `.nox`), installed dependencies (`node_modules`, `.venv`,
-`venv`, `bower_components`, `.terraform`), build output (`target`, `.gradle`, `coverage`, `.next`, `.nuxt`,
-`.svelte-kit`, `.turbo`, `.parcel-cache`), and `.pyc`, `.pyo` and `.DS_Store` files. A contract run may write in those
-folders; any other file it creates or changes, ignored or not, fails the check unless `necro.toml` declares it under
-`outputs`.
+holds only that the file is there, its size, modification time, inode and change time. A name Python can import or run
+(`*.py`, `*.pth`, `conftest*`, `sitecustomize*`, `usercustomize*`) is never treated as a credential file. A link is
+never opened or followed, whatever it points to: its pin is its own text (what `readlink` gives), so a link that
+appears, disappears or points elsewhere is a change like any other. A contract cannot freeze a credential file or a
+link. Never walked, pinned or checked: version control and necro's own (`.git`, `.hg`, `.svn`, `.necro`), test-tool
+caches (`__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.tox`, `.nox`), installed dependencies
+(`node_modules`, `.venv`, `venv`, `bower_components`, `.terraform`), build output (`target`, `.gradle`, `coverage`,
+`.next`, `.nuxt`, `.svelte-kit`, `.turbo`, `.parcel-cache`), and `.pyc`, `.pyo` and `.DS_Store` files. A contract run
+may write in those folders; any other file it creates or changes, ignored or not, fails the check unless `necro.toml`
+declares it under `outputs`.
 
 `verify` checks the receipt's hash, re-hashes every pinned file except credential files, looks for added files and
 checks that the lock is exactly what freezing `necro.toml` would write. It re-runs the contracts only when a person
@@ -138,6 +138,8 @@ Under `plugins.entries.contract-necromancer.settings`: `gate_budget_seconds` (25
   and a removed lock fails closed. A process running as your user that sets out to evade both can still change
   files and approvals (it can read the HMAC key). Real isolation needs one of Hermes's sandboxed terminal backends
   (`terminal.backend: docker`, `modal` and others), untested here.
+- **A deleting find started outside the project** (`/`, `~`, or a relative path) is not blocked by the guard; any
+  change to a frozen file still fails its tests, and a removed lock fails closed.
 - **The person check.** Hermes runs the agent's commands on pipes, but a background command with `pty=true` gets a
   real terminal, so the plugin also checks its own `NECRO_AGENT_SESSION` marker, Hermes's `HERMES_AGENT` variable and
   whether a Hermes process started the shell. Any of them refuses.
@@ -150,7 +152,7 @@ Under `plugins.entries.contract-necromancer.settings`: `gate_budget_seconds` (25
   Contracts run as your user with a small environment (no API keys unless named under `env = [...]`).
 - **Credential files are never opened.** A contract run that changes one's size, modification time, inode or change
   time fails. `verify` compares only the size, so an edit after the receipt that keeps the size is not seen there; the
-  verdict says the file was not compared, and the re-run decides. A link to a credential file is hashed like any file.
+  verdict says the file was not compared, and the re-run decides.
 - **Slow or huge.** Contracts slower than the gate's budget are reported as not checked (the agent is told to run
   `necro_check`, which has 10 minutes); in a very large project, list the files that matter under `sources`.
 - Tested on macOS with Hermes 0.23.1 and 0.22.7, Python 3.11 and 3.14. Linux and Windows are untested here; the CI
@@ -159,17 +161,17 @@ Under `plugins.entries.contract-necromancer.settings`: `gate_budget_seconds` (25
 ## What it touches
 
 It runs the commands in your frozen `necro.toml` with your user's permissions and reads your project's files to hash
-them, except credential files such as `.env`, which it never opens: it records only their size and file times (a link
-is hashed like any file, so a credential file behind a link is read to hash it, never stored, logged or printed). It
-writes `.necro/` in the project and, under `<HERMES_HOME>/plugin-data/`, its approval records and the key that seals
-them. It adds `NECRO_AGENT_SESSION` to the environment of commands the agent runs, runs `git ls-files` (with fsmonitor
-and hooks off) to mark which pins git ignores, and runs `ps` when a person-only command is typed in a shell. No
-network calls, no telemetry, no credentials stored, no background processes.
+them, except credential files such as `.env`, which it never opens: it records only their size and file times. Links
+are never opened or followed; it records their text. It writes `.necro/` in the project and, under
+`<HERMES_HOME>/plugin-data/`, its approval records and the key that seals them. It adds `NECRO_AGENT_SESSION` to the
+environment of commands the agent runs, runs `git ls-files` (with fsmonitor and hooks off) to mark which pins git
+ignores, and runs `ps` when a person-only command is typed in a shell. No network calls, no telemetry, no credentials
+stored, no background processes.
 
 ## Tests
 
 ```
-python3 -m unittest discover -s tests                        # 250 tests, about 90 s
+python3 -m unittest discover -s tests                        # 253 tests, about 90 s
 python3 tests/e2e/run_in_hermes.py --hermes $(which hermes)    # the real Hermes agent loop
 ```
 

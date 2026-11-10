@@ -55,18 +55,19 @@ def skipped(rel: str) -> bool:
 
 
 def walk_files(root, deadline=None) -> list:
-    """Project-relative POSIX paths of every regular file under root, minus SKIP_DIRS and caches.
-    Symbolic links to files count (their target is what gets hashed); FIFOs, sockets, devices and
-    broken or looping links do not."""
+    """Project-relative POSIX paths of every regular file and every link under root, minus SKIP_DIRS
+    and caches. A link counts whatever it points to, a folder or nothing at all: it is pinned by its
+    text and never followed. FIFOs, sockets and devices do not count."""
     root = Path(root)
     out = []
     for dirpath, dirnames, filenames in os.walk(root):
+        links = [d for d in dirnames if d not in SKIP_DIRS and os.path.islink(os.path.join(dirpath, d))]
         dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
         check_deadline(deadline)
-        for name in sorted(filenames):
+        for name in sorted(filenames + links):
             full = os.path.join(dirpath, name)
             try:
-                if not stat.S_ISREG(os.stat(full).st_mode):
+                if not (os.path.islink(full) or stat.S_ISREG(os.stat(full).st_mode)):
                     continue
             except OSError:
                 continue
@@ -159,9 +160,8 @@ def expand(root, patterns, strict: bool = False, where: str = "files", files=Non
 
     A pattern is a path relative to the project root or a glob anchored there (``**`` spans
     folders). Caches such as __pycache__ never match. With ``strict`` (freezing) a pattern that
-    matches nothing, a match that is a link pointing outside the project, or a credential file (never
-    opened, so it cannot be frozen by hash) raises SpecError; otherwise such links are simply
-    included, so their target is hashed like any file."""
+    matches nothing, a link, or a credential file (neither is ever opened, so neither can be frozen by
+    hash) raises SpecError; otherwise a link is simply included and pinned by its text."""
     root = Path(root).resolve()
     found = set()
     for pattern in patterns:
@@ -174,11 +174,14 @@ def expand(root, patterns, strict: bool = False, where: str = "files", files=Non
             rel = Path(pattern).as_posix()
             full = root / rel
             try:
-                regular = stat.S_ISREG(os.stat(full).st_mode)
+                regular = os.path.islink(full) or stat.S_ISREG(os.stat(full).st_mode)
             except OSError:
                 regular = False
             hits = [rel] if regular and not skipped(rel) else []
         for rel in hits:
+            if strict and os.path.islink(root / rel):
+                raise SpecError(f"{where}: '{rel}' is a link, which Contract Necromancer pins by its text and never "
+                                "follows, so it cannot be frozen. Freeze the file it points to instead")
             if strict and not _inside(root, root / rel):
                 raise SpecError(f"{where}: '{rel}' points outside the project")
             if strict and is_credential_path(root / rel):
