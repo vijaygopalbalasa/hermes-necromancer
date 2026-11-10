@@ -628,3 +628,30 @@ class DoneClaimsPerSentence(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VerifyUsesTheTrustedLockForLinks(unittest.TestCase):
+    """A receipt is not signed, so a path inside it cannot widen what links may point to: the allow-set comes
+    from the receipt's own pins and the trusted lock, never from the receipt's copy of the lock's spec path."""
+
+    def test_a_forged_spec_path_in_the_receipt_does_not_widen_the_allowed_links(self):
+        with Project(code=FIXED) as p:
+            lock.freeze(p.dir)
+            v = gate.evaluate(p.dir, budget_s=120)
+            self.assertTrue(v.ok, v.problems)
+            rc = json.loads(v.receipt_path.read_text())
+            rc["lock"].setdefault("spec", {})["path"] = "forged_allowed.py"
+            rc["receiptHash"] = receipts.receipt_hash(rc)
+            v.receipt_path.write_text(json.dumps(rc))
+            seen = {}
+            real = verify.escaping_links
+
+            def spy(root, rels, pinned):
+                seen["pinned"] = set(pinned)
+                return real(root, rels, pinned)
+
+            with mock.patch.object(verify, "escaping_links", side_effect=spy):
+                verify.verify_receipt(v.receipt_path, run=False)
+            self.assertIn("pinned", seen)
+            self.assertNotIn("forged_allowed.py", seen["pinned"])
+            self.assertTrue(lock.frozen_paths(lock.read_lock(p.dir)) <= seen["pinned"])

@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .canon import file_pin, hash_file, is_credential_path
-from .lock import LockError, build_lock, drift, find_root, lock_hash, read_lock
+from .lock import LockError, build_lock, drift, find_root, frozen_paths, lock_hash, read_lock
 from .receipts import RECEIPT_KIND, SourcesError, escaping_links, receipt_hash, source_files
 from .runner import run_contracts
 from .spec import SpecError
@@ -131,7 +131,9 @@ def verify_receipt(receipt_file, cwd=None, budget_s: float | None = None, approv
     local_credentials = [rel for rel in unpinned if is_credential_path(root / rel)]
     added = [rel for rel in unpinned if rel not in local_credentials]
     receipt_paths = set(pins) | {f["path"] for c in rc["contracts"] for f in c.get("files", [])}
-    escapes = escaping_links(root, present, receipt_paths | {(rc["lock"].get("spec") or {}).get("path") or "necro.toml"})
+    # The receipt is not signed: what links may point to comes from its pins and the trusted lock, never from
+    # the receipt's own copy of the lock.
+    escapes = escaping_links(root, present, receipt_paths | frozen_paths(lk))
     if changed or added or escapes:
         parts = []
         if changed:
