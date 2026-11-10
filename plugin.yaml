@@ -1,0 +1,36 @@
+name: contract-necromancer
+version: "0.1.0"
+description: "Hermes cannot call coding work done while a frozen acceptance contract fails. A person freezes the contracts by hash; at the verify gate the plugin runs them and keeps the agent working, naming what fails; edits to frozen files are blocked; the final reply says Not done, or carries a receipt anyone can re-check."
+author: Vijaygopal Balasa (vijaygopalbalasa)
+license: MIT
+homepage: https://github.com/vijaygopalbalasa/hermes-necromancer
+requires_hermes: ">=0.22.7"
+manifest_version: 2
+tags: [coding, verification, tests, receipts]
+config_schema:
+  gate_budget_seconds:
+    type: float
+    default: 25
+    label: Gate time budget (seconds)
+    description: "How long the gate may spend running contracts before Hermes finishes. Keep it under plugins.hook_callback_timeout (30 s by default)."
+  check_budget_seconds:
+    type: float
+    default: 600
+    label: necro_check time budget (seconds)
+  hold_stream:
+    type: bool
+    default: false
+    label: Hold the reply until it is stamped
+    description: "When on, the person sees only the stamped final reply (no streaming) in this profile."
+  stamp_done_claims:
+    type: bool
+    default: true
+    label: Check replies that claim done
+    description: "Also check the contracts when a reply claims the work is done in a frozen project, even if no file was edited through write_file or patch."
+provides_tools:
+  - necro_status
+  - necro_check
+provides_hooks:
+  - pre_verify
+  - transform_llm_output
+  - pre_tool_call
