@@ -99,8 +99,8 @@ def _block(rel: str) -> str:
             "wrong, say so and ask the person to change it and run /necro freeze again.")
 
 
-TOO_LONG_BLOCK = ("Blocked by Contract Necromancer: this command is too long to check and it mentions necro or a frozen "
-                  "file. Split it into shorter commands.")
+TOO_LONG_BLOCK = ("Blocked by Contract Necromancer: this is too long to check inside a frozen project (or it names "
+                  "necro or a frozen file). Split it into shorter pieces.")
 EVASION_BLOCK = ("Blocked by Contract Necromancer: detaching a process or changing its environment next to a necro "
                  "command is not allowed from the agent's shell.")
 STORE_BLOCK = ("Blocked by Contract Necromancer: that is where a person's approvals of frozen contracts are kept. "
@@ -240,27 +240,35 @@ def _command_name(words: list) -> tuple:
 
 
 FIND_RUNNERS = {"-exec", "-execdir", "-ok", "-okdir"}
-FIND_DESTRUCTIVE = {"rm", "mv", "cp", "tee", "truncate", "chmod", "chown", "unlink", "shred", "rmdir", "ln", "dd"}
-FIND_BLOCK = ("Blocked by Contract Necromancer: a find that deletes or rewrites files is not allowed over a frozen "
-              "project ({root}). Delete or edit the files you mean one by one; the frozen contracts and .necro stay.")
+FIND_WRITERS = {"-delete", "-fprint", "-fprint0", "-fprintf", "-fls"}
+FIND_READ_ONLY = {"grep", "cat", "head", "tail", "wc", "ls", "stat", "file"}
+FIND_BLOCK = ("Blocked by Contract Necromancer: a find that deletes, writes or runs a program other than a read-only "
+              "one is not allowed over a frozen project ({root}). Name the files you mean one by one; the frozen "
+              "contracts and .necro stay.")
 
 
 def _find_is_destructive(args: list) -> bool:
-    if "-delete" in args:
+    """An allowlist: a find writes when it deletes or prints to a file, or runs any program that is not a
+    plain reader (grep, cat, head, tail, wc, ls, stat, file)."""
+    if any(a in FIND_WRITERS for a in args):
         return True
     for i, a in enumerate(args):
-        if a in FIND_RUNNERS and i + 1 < len(args):
-            cmd = os.path.basename(args[i + 1])
-            tail = []
-            for x in args[i + 2:]:
-                if x in (";", "+", "\\;"):
-                    break
-                tail.append(x)
-            if cmd in FIND_DESTRUCTIVE:
-                return True
-            if cmd in ("sed", "gsed", "perl") and any(re.match(r"^-[A-Za-z]*i", x) or x.startswith("--in-place") for x in tail):
+        if a in FIND_RUNNERS:
+            program = os.path.basename(args[i + 1]) if i + 1 < len(args) else ""
+            if program not in FIND_READ_ONLY:
                 return True
     return False
+
+
+def _tokens(text: str) -> list:
+    """The words of a command, plus the words of any word that is itself a command (an `sh -c` payload).
+    Deliberately simple: no parser, just one extra level."""
+    words = _words(text)
+    out = list(words)
+    for w in words:
+        if any(ch.isspace() for ch in w):
+            out.extend(_words(w))
+    return out
 
 
 def _find_starts(args: list) -> list:
@@ -311,20 +319,31 @@ def _code_writes(low_text: str, spellings: set) -> bool:
     return False
 
 
+def _inside_frozen(wd: str, frozen_roots=()) -> bool:
+    if not wd:
+        return False
+    here = Path(os.path.realpath(wd))
+    if find_root(here) is not None:
+        return True
+    return any(here == Path(r) or Path(r) in here.parents for r in frozen_roots or ())
+
+
 def _shell_block(cmd: str, wd: str, store_dir: str | None, frozen_roots=()) -> str | None:
     full_low = cmd.lower()
     if len(cmd) > MAX_TEXT:
         root = find_root(wd) if wd else None
         lk = _lock_for(root) if root else None
         frozen = [rel for rel in (frozen_paths(lk) if lk else ()) if rel.lower() in full_low]
-        if "necro" in full_low or frozen or any(n in full_low for n in _store_needles(store_dir)):
+        if (_inside_frozen(wd, frozen_roots) or "necro" in full_low or frozen
+                or any(n in full_low for n in _store_needles(store_dir))):
             return TOO_LONG_BLOCK
         cmd = cmd[:MAX_TEXT]
-    words = _words(cmd)
     low = cmd.lower()
+    if _person_only_text(low) or "necro_agent_session" in low:  # cheap text checks first
+        return PERSON_BLOCK
+    words = _words(cmd)
     joined = " ".join(words).lower()
-    if (_person_only(words) or _person_only_text(low) or _person_only_text(joined)
-            or "necro_agent_session" in low or "necro_agent_session" in joined):
+    if _person_only(words) or _person_only_text(joined) or "necro_agent_session" in joined:
         return PERSON_BLOCK
     if ("necro" in low or "necro" in joined) and (EVASION.search(low) or EVASION.search(joined)):
         return EVASION_BLOCK
@@ -340,12 +359,13 @@ def _shell_block(cmd: str, wd: str, store_dir: str | None, frozen_roots=()) -> s
             r = find_root(_resolve(token, wd))
             if r and r not in roots:
                 roots.append(r)
-    for segment in SEGMENT_SPLIT.split(cmd):
-        name, rest = _command_name(_words(segment))
-        if name == "find":
-            msg = _find_block(rest, wd, frozen_roots)
-            if msg:
-                return msg
+    for chunk in [cmd] + SEGMENT_SPLIT.split(cmd):
+        tokens = _tokens(chunk)
+        for i, token in enumerate(tokens):
+            if os.path.basename(token) in ("find", "gfind"):
+                msg = _find_block(tokens[i + 1:], wd, frozen_roots)
+                if msg:
+                    return msg
     for root in roots:
         lk = _lock_for(root)
         if not lk:
@@ -381,7 +401,7 @@ def _shell_block(cmd: str, wd: str, store_dir: str | None, frozen_roots=()) -> s
     return None
 
 
-def _code_block(code: str, cwd: str, store_dir: str | None) -> str | None:
+def _code_block(code: str, cwd: str, store_dir: str | None, frozen_roots=()) -> str | None:
     low = code.lower()
     if any(n in low for n in _store_needles(store_dir)):
         return STORE_BLOCK
@@ -389,7 +409,7 @@ def _code_block(code: str, cwd: str, store_dir: str | None) -> str | None:
     lk = _lock_for(root) if root else None
     if len(code) > MAX_TEXT:
         named = lk and _mentions(low, root, lk, cwd)
-        return TOO_LONG_BLOCK if ("necro" in low or named) else None
+        return TOO_LONG_BLOCK if (_inside_frozen(cwd, frozen_roots) or "necro" in low or named) else None
     if _person_only_text(low):
         return PERSON_BLOCK
     if root is None or not lk:
@@ -420,5 +440,5 @@ def check_tool_call(tool_name: str, args, cwd: str, store_dir: str | None = None
         return _shell_block(cmd, str(_resolve(wd, cwd)) if wd else cwd, store_dir, frozen_roots)
     if tool_name == "execute_code":
         code = args.get("code")
-        return _code_block(code, cwd, store_dir) if isinstance(code, str) else None
+        return _code_block(code, cwd, store_dir, frozen_roots) if isinstance(code, str) else None
     return None

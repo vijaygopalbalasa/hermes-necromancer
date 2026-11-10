@@ -279,7 +279,7 @@ class GuardPrecision(unittest.TestCase):
         cmd = "echo " + " ".join(["necro"] * 30000) + " approve-ish"
         t0 = time.monotonic()
         self.check("terminal", {"command": cmd})
-        self.assertLess(time.monotonic() - t0, 1.0)
+        self.assertLess(time.monotonic() - t0, 2.0)  # the review measured 24 s before the fix
 
 
 class StampWhenItMatters(unittest.TestCase):

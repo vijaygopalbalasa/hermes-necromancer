@@ -157,5 +157,39 @@ class FindOverAFrozenProject(unittest.TestCase):
             self.assertFalse(self.blocked(f"find {other.dir} -name '*.tmp' -delete"))
 
 
+class Round5(unittest.TestCase):
+    """Round 5: the find guard becomes an allowlist and looks inside every segment; long input in a
+    frozen project is refused outright."""
+
+    def setUp(self):
+        self.p = Project(code=FIXED)
+        lock.freeze(self.p.dir)
+
+    def tearDown(self):
+        self.p.cleanup()
+
+    def blocked(self, tool, payload, wd=None):
+        key = "command" if tool == "terminal" else "code"
+        return guard.check_tool_call(tool, {key: payload}, str(wd or self.p.dir)) is not None
+
+    def test_find_runs_only_read_only_programs(self):
+        self.assertTrue(self.blocked("terminal", "find . -name '*.py' -exec sh -c 'cat > \"$1\"' _ {} \\;"))
+        self.assertTrue(self.blocked("terminal", "find . -name '*.py' -fprint out.txt"))
+        self.assertFalse(self.blocked("terminal", "find . -name '*.py' -exec grep -n split {} +"))
+        self.assertFalse(self.blocked("terminal", "find . -name '*.py' -exec wc -l {} +"))
+
+    def test_any_over_long_input_inside_a_frozen_project_is_refused(self):
+        long_text = "echo " + "a" * (guard.MAX_TEXT + 10)
+        self.assertTrue(self.blocked("terminal", long_text))
+        self.assertTrue(self.blocked("execute_code", "x = 1\n" * (guard.MAX_TEXT // 6 + 10)))
+        with Project() as elsewhere:
+            self.assertFalse(self.blocked("terminal", long_text, wd=elsewhere.dir))
+
+    def test_find_is_recognised_inside_other_commands(self):
+        for cmd in ("gfind . -delete", "busybox find . -delete", "echo x | xargs find . -delete",
+                    "sh -c 'find . -name \"*.py\" -delete'", "bash -c \"cd . && find . -delete\""):
+            self.assertTrue(self.blocked("terminal", cmd), cmd)
+
+
 if __name__ == "__main__":
     unittest.main()

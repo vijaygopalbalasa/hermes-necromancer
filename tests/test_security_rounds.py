@@ -144,8 +144,10 @@ class R2PersonOnlyTextCheck(unittest.TestCase):
     def test_a_long_command_that_mentions_necro_is_refused_not_truncated(self):
         self.assertTrue(self.blocked("echo " + "a" * 600_000 + " && hermes necro approve"))
 
-    def test_a_long_command_without_necro_is_not_refused_for_length(self):
-        self.assertFalse(self.blocked("echo " + "a" * 600_000))
+    def test_a_long_command_outside_a_frozen_project_is_not_refused_for_length(self):
+        # Round 5: inside a frozen project every over-long command is refused; elsewhere length alone is fine.
+        with Project() as elsewhere:
+            self.assertIsNone(guard.check_tool_call("terminal", {"command": "echo " + "a" * 600_000}, str(elsewhere.dir)))
 
     def test_evasion_next_to_necro_is_blocked(self):
         for cmd in ("env -i hermes necro check", "env -u NECRO_AGENT_SESSION hermes necro check",

@@ -192,7 +192,7 @@ def do_freeze(cwd, approvals: Approvals) -> tuple:
         return f"Could not freeze: {exc}", 1
     digest = lock_hash(lk)
     approvals.approve(root, digest)
-    files = sum(len(c["files"]) for c in lk["contracts"])
+    files = len({f["path"] for c in lk["contracts"] for f in c["files"]})
     lines = [f"Froze {len(lk['contracts'])} contracts ({files} files) in {root}, lock {digest[:12]}:"]
     lines += _contract_lines(lk)
     lines.append("From now on Hermes cannot finish coding work here while any of these fails, and edits to the "
