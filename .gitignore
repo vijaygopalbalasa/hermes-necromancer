@@ -5,3 +5,6 @@ __pycache__/
 .env
 .env.*
 .DS_Store
+NOTES.md
+CATALOG-PR.md
+VIDEO-SCRIPT.md
