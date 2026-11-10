@@ -70,8 +70,11 @@ def main() -> int:
                              stdout=subprocess.PIPE, text=True)
     try:
         port = int(model.stdout.readline().strip())
+        base = f"http://127.0.0.1:{port}/v1"
+        for key, value in (("model.provider", "custom"), ("model.base_url", base), ("model.default", "scripted")):
+            run([args.hermes, "config", "set", key, value], env)
         chat = run([args.hermes, "chat", "-q", TASK, "--oneshot", "-Q", "--provider", "custom",
-                    "--base-url", f"http://127.0.0.1:{port}/v1", "--api-key", "scripted-no-key", "-m", "scripted",
+                    "--base-url", base, "--api-key", "scripted-no-key", "-m", "scripted",
                     "--in", str(project)], env, cwd=project, timeout=900, check=False)
     finally:
         model.terminate()
