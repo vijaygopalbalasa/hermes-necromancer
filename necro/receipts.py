@@ -113,6 +113,27 @@ def pin_entry(rel: str, value, ignored: bool) -> dict:
     return entry
 
 
+def escaping_links(root, rels, pinned) -> list:
+    """"link -> target" for each link among ``rels`` whose target is not pinned on its own: outside the
+    project, in a folder never walked (.necro, caches, installed dependencies), a declared output, a
+    folder, or missing. A link's pin is only its text, so its target must be a pinned file. Nothing is
+    opened: realpath reads link text only."""
+    root = Path(root).resolve()
+    pinned = set(pinned)
+    out = []
+    for rel in sorted(rels):
+        if not os.path.islink(root / rel):
+            continue
+        target = Path(os.path.realpath(root / rel))
+        try:
+            inner = target.relative_to(root).as_posix()
+        except ValueError:
+            inner = None
+        if inner is None or inner not in pinned:
+            out.append(f"{rel} -> {target if inner is None else inner}")
+    return out
+
+
 def pin(root: Path, rels, deadline=None) -> list:
     rels = list(rels)
     ignored = git_ignored(root, rels)

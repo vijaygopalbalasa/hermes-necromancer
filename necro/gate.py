@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .canon import BudgetExceeded, canonical_json, check_deadline, file_pin, sha256_text
 from .lock import LOCK_REL, LockError, build_lock, drift, frozen_paths, lock_hash, read_lock
-from .receipts import SourcesError, build_receipt, git_ignored, pin_entry, source_files, write_receipt
+from .receipts import SourcesError, build_receipt, escaping_links, git_ignored, pin_entry, source_files, write_receipt
 from .runner import all_pass, run_contracts
 from .spec import SpecError, expand, walk_files
 
@@ -143,6 +143,11 @@ def evaluate(root, *, budget_s: float | None = None, deadline: float | None = No
             problems.append(f"{LOCK_REL} does not match necro.toml and the frozen files, so it was not written by "
                             "freezing them. A person checks `git diff .necro/` and freezes again")
         before, _ = snapshot(root, lk, files, deadline)
+        escapes = escaping_links(root, before, before)
+        if escapes:
+            shown = ", ".join(escapes[:10]) + (" and more" if len(escapes) > 10 else "")
+            problems.append(f"a link points outside what is frozen: {shown}. A link is pinned by its text only, so "
+                            "its target must be a file in the project; a person removes the link or points it at one")
         key = str(root)
         hit = cache.get(key) if cache is not None else None
         if hit and hit["lock"] == lh and _digest(lh, before) == hit["digest"]:

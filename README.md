@@ -104,7 +104,9 @@ ignored file can change a run. Pins that git ignores are marked `ignored`. Crede
 holds only that the file is there, its size, modification time, inode and change time. A name Python can import or run
 (`*.py`, `*.pth`, `conftest*`, `sitecustomize*`, `usercustomize*`) is never treated as a credential file. A link is
 never opened or followed, whatever it points to: its pin is its own text (what `readlink` gives), so a link that
-appears, disappears or points elsewhere is a change like any other. A contract cannot freeze a credential file or a
+appears, disappears or points elsewhere is a change like any other. Its target must be pinned on its own: a link to
+something outside the project, in a folder never walked (`.necro`, `node_modules` and the like), in a declared output,
+to a folder or to nothing fails the check, and `verify` says MISMATCH. A contract cannot freeze a credential file or a
 link. Never walked, pinned or checked: version control and necro's own (`.git`, `.hg`, `.svn`, `.necro`), test-tool
 caches (`__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.tox`, `.nox`), installed dependencies
 (`node_modules`, `.venv`, `venv`, `bower_components`, `.terraform`), build output (`target`, `.gradle`, `coverage`,
@@ -171,7 +173,7 @@ stored, no background processes.
 ## Tests
 
 ```
-python3 -m unittest discover -s tests                        # 253 tests, about 90 s
+python3 -m unittest discover -s tests                        # 255 tests, about 90 s
 python3 tests/e2e/run_in_hermes.py --hermes $(which hermes)    # the real Hermes agent loop
 ```
 

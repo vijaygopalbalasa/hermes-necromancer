@@ -21,8 +21,9 @@ from necro import demo
 SECRET = "DUMMY_TOKEN_FOR_THIS_TEST_ONLY=necro-test-value-8231"
 
 # Every open() in this process (builtins.open, io.open, os.open, pathlib) raises the "open" audit event.
-# While a test watches a project folder, any open of a credential file in it is recorded: by its own
-# name, or by the name of the file a link points at.
+# While a test watches a project folder, two kinds of open in it are recorded: a credential file (by its
+# own name, or the name a link resolves to), and any path that is itself a link (necro never reads
+# through a link).
 _AUDIT = {"under": None, "opened": []}
 
 
@@ -31,9 +32,10 @@ def _audit(event, args):
     if under is None or event != "open" or not args or not isinstance(args[0], (str, bytes, os.PathLike)):
         return
     path = os.fsdecode(args[0])
-    if not os.path.realpath(path).startswith(under):
+    if not (os.path.abspath(path).startswith(under) or os.path.realpath(path).startswith(under)):
         return
-    if spec.is_credential(os.path.basename(path)) or spec.is_credential(os.path.basename(os.path.realpath(path))):
+    if (os.path.islink(path) or spec.is_credential(os.path.basename(path))
+            or spec.is_credential(os.path.basename(os.path.realpath(path)))):
         _AUDIT["opened"].append(path)
 
 
@@ -41,8 +43,8 @@ sys.addaudithook(_audit)
 
 
 @contextlib.contextmanager
-def credential_opens(folder):
-    """Yields the list of credential files opened under ``folder`` while the block runs."""
+def forbidden_opens(folder):
+    """Yields the list of credential files and links opened under ``folder`` while the block runs."""
     _AUDIT["opened"] = []
     _AUDIT["under"] = os.path.realpath(folder).rstrip("/") + "/"
     try:
@@ -232,7 +234,7 @@ class CredentialFiles(unittest.TestCase):
         p.write("contracts/test_refuses_zero.py",
                 "import os, unittest\nclass T(unittest.TestCase):\n    def test_w(self):\n" + body)
         lock.freeze(p.dir)
-        with credential_opens(p.dir) as opened:
+        with forbidden_opens(p.dir) as opened:
             v = gate.evaluate(p.dir, budget_s=60)
         self.assertEqual(opened, [])
         return v
@@ -257,30 +259,76 @@ class CredentialFiles(unittest.TestCase):
         self.assertFalse(v.ok)
         self.assertTrue(any(".env" in x for x in v.problems), v.problems)
 
-    def test_a_link_is_pinned_by_its_text_and_never_opened_whatever_it_points_at(self):
-        # Review, Nov 11: a link is never opened or followed; its pin is the text os.readlink gives.
+    def test_no_file_is_ever_opened_through_a_link_and_a_link_pin_holds_its_text(self):
+        # Review, Nov 11: a link is never opened or followed, whatever it points to, a .env included; its pin
+        # is the text os.readlink gives. A link to a file pinned on its own needs nothing more.
         with Project(code=FIXED) as p:
             p.write(".env", SECRET + "\n")
             os.symlink(".env", p.path("settings.txt"))
             os.symlink(".env", p.path(".env.local"))
-            os.symlink("/nowhere/at/all", p.path("broken"))
-            os.symlink("contracts", p.path("tests-link"))
+            os.symlink("tipsplit.py", p.path("alias.py"))
+            os.symlink("contracts/test_fair.py", p.path("fair-link.py"))
+            os.symlink("loop", p.path("loop"))
             self.assertFalse(canon.is_credential_path(p.path("settings.txt")))
             self.assertFalse(canon.is_credential_path(p.path(".env.local")))
             self.assertTrue(canon.is_credential_path(p.path(".env")))
-            with credential_opens(p.dir) as opened:
+            with forbidden_opens(p.dir) as opened:
                 lock.freeze(p.dir)
                 v = gate.evaluate(p.dir, budget_s=60)
                 self.assertTrue(v.ok, v.problems)
                 out = verify.verify_receipt(v.receipt_path, run=True)
+                self.assertIsNone(canon.hash_file(p.path("alias.py")))
             self.assertEqual(opened, [])
             self.assertEqual(out.verdict, "CONFIRMED", out.message)
             pins = pins_of(v)
-            self.assertEqual(pins["settings.txt"], {"path": "settings.txt", "link": ".env"})
-            self.assertEqual(pins[".env.local"], {"path": ".env.local", "link": ".env"})
-            self.assertEqual(pins["broken"], {"path": "broken", "link": "/nowhere/at/all"})
-            self.assertEqual(pins["tests-link"], {"path": "tests-link", "link": "contracts"})
+            for name, text in (("settings.txt", ".env"), (".env.local", ".env"), ("alias.py", "tipsplit.py"),
+                               ("fair-link.py", "contracts/test_fair.py"), ("loop", "loop")):
+                self.assertEqual(pins[name], {"path": name, "link": text}, name)
             self.assertTrue(pins[".env"].get("credential"))
+
+    def test_a_link_to_a_target_outside_the_project_fails_the_gate_and_verify(self):
+        elsewhere = Path(tempfile.mkdtemp(prefix="necro-elsewhere-")).resolve()
+        self.addCleanup(shutil.rmtree, elsewhere, True)
+        (elsewhere / "x.py").write_text("X = 1\n")
+        with Project(code=FIXED) as p:
+            os.symlink(elsewhere / "x.py", p.path("helper.py"))
+            lock.freeze(p.dir)
+            with forbidden_opens(p.dir) as opened:
+                v = gate.evaluate(p.dir, budget_s=60)
+            self.assertEqual(opened, [])
+            self.assertFalse(v.ok)
+            self.assertTrue(any(f"a link points outside what is frozen: helper.py -> {elsewhere / 'x.py'}" in x
+                                for x in v.problems), v.problems)
+        with Project(code=FIXED) as p:
+            os.symlink(p.path("tipsplit.py"), p.path("abs.py"))  # absolute text: fine here, outside in a copy
+            lock.freeze(p.dir)
+            v = gate.evaluate(p.dir, budget_s=60)
+            self.assertTrue(v.ok, v.problems)
+            copy = Path(tempfile.mkdtemp(prefix="necro-copy-")).resolve() / "copy"
+            self.addCleanup(shutil.rmtree, copy.parent, True)
+            shutil.copytree(p.dir, copy, symlinks=True)
+            out = verify.verify_receipt(copy / v.receipt_path.relative_to(p.dir), run=True)
+            self.assertEqual(out.verdict, "MISMATCH", out.message)
+            self.assertIn(f"outside what is frozen: abs.py -> {p.path('tipsplit.py')}", out.message)
+
+    def test_links_into_skipped_folders_necro_outputs_or_folders_fail_closed(self):
+        with Project(code=FIXED) as p:
+            p.write("necro.toml", 'outputs = ["reports/*.xml"]\n' + p.read("necro.toml"))
+            p.write("node_modules/pkg/x.js", "module.exports = 1\n")
+            p.write("reports/a.xml", "<a/>\n")
+            os.symlink("node_modules/pkg/x.js", p.path("nm-link.js"))
+            os.symlink(".necro/lock.json", p.path("lock-link.json"))
+            os.symlink("reports/a.xml", p.path("report-link.xml"))
+            os.symlink("contracts", p.path("tests-link"))
+            lock.freeze(p.dir)
+            with forbidden_opens(p.dir) as opened:
+                v = gate.evaluate(p.dir, budget_s=60)
+            self.assertEqual(opened, [])
+            self.assertFalse(v.ok)
+            problem = next((x for x in v.problems if "a link points outside what is frozen" in x), "")
+            for shown in ("nm-link.js -> node_modules/pkg/x.js", "lock-link.json -> .necro/lock.json",
+                          "report-link.xml -> reports/a.xml", "tests-link -> contracts"):
+                self.assertIn(shown, problem, v.problems)
 
     def test_a_link_that_changes_appears_or_is_frozen_is_a_change_like_any_other(self):
         with Project(code=FIXED) as p:
@@ -321,13 +369,13 @@ class CredentialFiles(unittest.TestCase):
         g = GitWork(FIXED)
         try:
             os.symlink("tipsplit.py", g.author / "alias.py")
-            os.symlink("contracts", g.author / "tests-link")
+            os.symlink("contracts/test_fair.py", g.author / "fair-link.py")
             lock.freeze(g.author)
             g.git("add", "-A")
             g.git("commit", "-qm", "links")
             v = gate.evaluate(g.author, budget_s=120)
             self.assertTrue(v.ok, v.problems)
-            for name in ("alias.py", "tests-link"):
+            for name in ("alias.py", "fair-link.py"):
                 self.assertNotIn("ignored", pins_of(v)[name], name)
         finally:
             g.cleanup()
@@ -340,7 +388,7 @@ class CredentialFiles(unittest.TestCase):
         (folder / "approvals.key").write_text(old_key.hex())
         at, digest, root = "2026-11-10T00:00:00Z", "ab" * 32, "/some/project"
         state.set(cmd.Approvals.KEY, {root: {"lock": digest, "at": at, "mac": cmd.Approvals._mac(old_key, root, digest, at)}})
-        with credential_opens(folder) as opened:
+        with forbidden_opens(folder) as opened:
             mapping = cmd.Approvals(state).mapping()
         self.assertEqual(opened, [])
         self.assertEqual(mapping[root], digest)
@@ -368,7 +416,7 @@ class CredentialFiles(unittest.TestCase):
         with Project(code=FIXED) as p:
             for name in (".env", ".env.local", "deploy/server.pem", "certs/Site.KEY", ".netrc"):
                 p.write(name, SECRET + "\n")
-            with credential_opens(p.dir) as opened:
+            with forbidden_opens(p.dir) as opened:
                 lk = lock.freeze(p.dir)
                 self.assertIsNotNone(gate.fingerprint(p.dir))
                 v = gate.evaluate(p.dir, budget_s=60)
@@ -390,7 +438,7 @@ class CredentialFiles(unittest.TestCase):
             p.write(".env", SECRET + "\n")
             lock.freeze(p.dir)
             v = gate.evaluate(p.dir, budget_s=60)
-            with credential_opens(p.dir) as opened:
+            with forbidden_opens(p.dir) as opened:
                 out = verify.verify_receipt(v.receipt_path, run=True)
             self.assertEqual(opened, [])
             self.assertEqual(out.verdict, "CONFIRMED", out.message)
@@ -415,7 +463,7 @@ class CredentialFiles(unittest.TestCase):
             v = gate.evaluate(p.dir, budget_s=60)
             with open(p.path(".env"), "a") as handle:
                 handle.write("MORE=1\n")
-            with credential_opens(p.dir) as opened:
+            with forbidden_opens(p.dir) as opened:
                 out = verify.verify_receipt(v.receipt_path, run=True)
             self.assertEqual(opened, [])
             self.assertEqual(out.verdict, "MISMATCH", out.message)
@@ -460,7 +508,7 @@ class CredentialFiles(unittest.TestCase):
                 [s["path"] for s in rc["sources"]].index(".env"), {"path": ".env", "sha256": real}))
             forged = receipts.receipt_file(p.dir, json.loads(v.receipt_path.read_text())["receiptHash"])
             v.receipt_path.rename(forged)
-            with credential_opens(p.dir) as opened:
+            with forbidden_opens(p.dir) as opened:
                 out = verify.verify_receipt(forged, run=True)
             self.assertEqual(opened, [])
             self.assertEqual(out.verdict, "MISMATCH", out.message)
@@ -471,7 +519,7 @@ class CredentialFiles(unittest.TestCase):
             p.write("contracts/.env", SECRET + "\n")
             p.write("necro.toml", p.read("necro.toml").replace('files = ["contracts/test_fair.py"]',
                                                                 'files = ["contracts/**"]'))
-            with credential_opens(p.dir) as opened, self.assertRaises(spec.SpecError) as caught:
+            with forbidden_opens(p.dir) as opened, self.assertRaises(spec.SpecError) as caught:
                 lock.freeze(p.dir)
             self.assertEqual(opened, [])
             self.assertIn("contracts/.env", str(caught.exception))
@@ -482,7 +530,7 @@ class CredentialFiles(unittest.TestCase):
         with Project(code=FIXED) as p:
             p.write(".env", SECRET + "\n")
             lock.freeze(p.dir)
-            with credential_opens(p.dir) as opened:
+            with forbidden_opens(p.dir) as opened:
                 out = verify.verify_receipt(p.path(".env"))
             self.assertEqual(opened, [])
             self.assertEqual(out.verdict, "MISMATCH")
@@ -540,7 +588,7 @@ class VerifyExtras(unittest.TestCase):
             v = gate.evaluate(g.author, budget_s=120)
             self.assertTrue(v.ok, v.problems)
             clone = g.commit_and_clone()
-            with credential_opens(clone) as opened:
+            with forbidden_opens(clone) as opened:
                 out = verify.verify_receipt(clone / v.receipt_path.relative_to(g.author), run=True)
             self.assertEqual(opened, [])
             self.assertEqual(out.verdict, "CONFIRMED", out.message)
@@ -556,7 +604,7 @@ class VerifyExtras(unittest.TestCase):
             v = gate.evaluate(g.author, budget_s=120)
             clone = g.commit_and_clone()
             (clone / ".env").write_text(SECRET + "\n")
-            with credential_opens(clone) as opened:
+            with forbidden_opens(clone) as opened:
                 out = verify.verify_receipt(clone / v.receipt_path.relative_to(g.author), run=True)
             self.assertEqual(opened, [])
             self.assertEqual(out.verdict, "CONFIRMED", out.message)
