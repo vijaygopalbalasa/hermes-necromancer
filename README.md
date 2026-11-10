@@ -96,23 +96,25 @@ Hermes: `python3 <plugin folder>/necro verify .necro/receipts/<hash>.json --run`
 
 A receipt is `.necro/receipts/<sha256>.json`, named by the hash of its own contents. It pins the lock, every contract
 file, each contract's result and every other project file by SHA-256, whether git ignores it or not, because an
-ignored file can change a run. Pins that git ignores are marked `ignored`; credential files (`.env`, keys, `.netrc`
-and the like) are marked `credential`, and their contents are hashed, never stored, logged or printed. Never walked,
-pinned or checked: version control and necro's own (`.git`, `.hg`, `.svn`, `.necro`), test-tool caches
-(`__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.tox`, `.nox`), installed dependencies
-(`node_modules`, `.venv`, `venv`, `bower_components`, `.terraform`), build output (`target`, `.gradle`, `coverage`,
-`.next`, `.nuxt`, `.svelte-kit`, `.turbo`, `.parcel-cache`), and `.pyc`, `.pyo` and `.DS_Store` files. A contract
-run may write in those folders; any other file it creates or changes, ignored or not, fails the check unless
-`necro.toml` declares it under `outputs`.
+ignored file can change a run. Pins that git ignores are marked `ignored`. Credential files (`.env`, `.env.*`, keys,
+`.netrc` and the like, or a link to one) are never opened, not even to hash them: their pin, marked `credential`,
+holds only that the file is there, its size and its modification time, so a change that keeps both is not detected. A
+contract cannot freeze a credential file. Never walked, pinned or checked: version control and necro's own (`.git`,
+`.hg`, `.svn`, `.necro`), test-tool caches (`__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.tox`,
+`.nox`), installed dependencies (`node_modules`, `.venv`, `venv`, `bower_components`, `.terraform`), build output
+(`target`, `.gradle`, `coverage`, `.next`, `.nuxt`, `.svelte-kit`, `.turbo`, `.parcel-cache`), and `.pyc`, `.pyo` and
+`.DS_Store` files. A contract run may write in those folders; any other file it creates or changes, ignored or not,
+fails the check unless `necro.toml` declares it under `outputs`.
 
-`verify` checks the receipt's hash, re-hashes every pinned file, looks for added files and checks that the lock is
-exactly what freezing `necro.toml` would write. It re-runs the contracts only when a person approved that lock for
-that folder, or when you add `--run` after reading `necro.toml`, because re-running executes the project's commands.
-In another checkout, such as a fresh clone, a pin marked `ignored` or `credential` that is missing there is listed
-as local-only, not a mismatch by itself, and the re-run decides: `CONFIRMED <hash> (1 local-only file not present
-here: .env).` A tracked pin that differs, or a local-only pin that is present but differs, is a `MISMATCH`. The
-answer is `CONFIRMED`, `MISMATCH` (naming what changed), `SUPERSEDED` (frozen again since), or `HASHES MATCH` (files
-match but nothing was re-run; not a confirmation).
+`verify` checks the receipt's hash, re-checks every pinned file (a credential file by size and modification time),
+looks for added files and checks that the lock is exactly what freezing `necro.toml` would write. It re-runs the
+contracts only when a person approved that lock for that folder, or when you add `--run` after reading `necro.toml`,
+because re-running executes the project's commands. In another checkout, such as a fresh clone, a pin marked `ignored`
+or `credential` that is missing there is listed as local-only, not a mismatch by itself, and the re-run decides:
+`CONFIRMED <hash> (1 local-only file not present here: .env).` A tracked pin that differs, or a local-only pin that is
+present but differs, is a `MISMATCH`; a credential file differs when its size or modification time does, so a copied
+or touched `.env` counts as changed. The answer is `CONFIRMED`, `MISMATCH` (naming what changed), `SUPERSEDED` (frozen
+again since), or `HASHES MATCH` (files match but nothing was re-run; not a confirmation).
 
 ## Settings
 
@@ -134,6 +136,8 @@ Under `plugins.entries.contract-necromancer.settings`: `gate_budget_seconds` (25
   project that changes how a test runs (a `unittest.py` that shadows Python's own, even one git ignores) can make a
   local run pass; it is pinned and listed in the receipt, and `verify --run` in a fresh clone, which lacks it, fails.
   Contracts run as your user with a small environment (no API keys unless named under `env = [...]`).
+- **Credential files are never opened.** Their pins hold size and modification time only, so an edit to `.env` that
+  keeps both is not detected.
 - **Slow or huge.** Contracts slower than the gate's budget are reported as not checked (the agent is told to run
   `necro_check`, which has 10 minutes); in a very large project, list the files that matter under `sources`.
 - Tested on macOS with Hermes 0.23.1 and 0.22.7, Python 3.11 and 3.14. Linux and Windows are untested here; the CI
@@ -142,11 +146,11 @@ Under `plugins.entries.contract-necromancer.settings`: `gate_budget_seconds` (25
 ## What it touches
 
 It runs the commands in your frozen `necro.toml` with your user's permissions and reads your project's files to hash
-them, credential files such as `.env` included: their contents are hashed, never stored, logged or printed. It writes
-`.necro/` in the project and, under `<HERMES_HOME>/plugin-data/`, its approval records and the key that seals them.
-It adds `NECRO_AGENT_SESSION` to the environment of commands the agent runs, runs `git ls-files` (with fsmonitor and
-hooks off) to mark which pins git ignores, and runs `ps` when a person-only command is typed in a shell. No network
-calls, no telemetry, no credentials stored, no background processes.
+them, except credential files such as `.env`, which it never opens: it records only their size and modification time.
+It writes `.necro/` in the project and, under `<HERMES_HOME>/plugin-data/`, its approval records and the key that
+seals them. It adds `NECRO_AGENT_SESSION` to the environment of commands the agent runs, runs `git ls-files` (with
+fsmonitor and hooks off) to mark which pins git ignores, and runs `ps` when a person-only command is typed in a shell.
+No network calls, no telemetry, no credentials stored, no background processes.
 
 ## Tests
 

@@ -8,10 +8,10 @@ import stat
 import subprocess
 from pathlib import Path
 
-from .canon import canonical_json, hash_file, sha256_text, utc_now, write_json_atomic
+from .canon import canonical_json, file_pin, is_credential_path, sha256_text, utc_now, write_json_atomic
 from .lock import frozen_paths, lock_hash
 from .runner import all_pass
-from .spec import expand, is_credential, matches, skipped, walk_files
+from .spec import expand, matches, skipped, walk_files
 
 RECEIPTS_REL = ".necro/receipts"
 RECEIPT_KIND = "hermes-necromancer/receipt"
@@ -98,21 +98,23 @@ def git_ignored(root: Path, rels) -> set:
     return set(rels) - set(listed)
 
 
-def pin_entry(rel: str, digest, ignored: bool) -> dict:
-    """One pin. ``ignored`` and ``credential`` mark files another checkout may not have; a credential
-    file's contents are hashed, never stored."""
-    entry = {"path": rel, "sha256": digest}
+def pin_entry(rel: str, value, ignored: bool) -> dict:
+    """One pin, from canon.file_pin: a SHA-256, or for a credential file, which is never opened, its
+    size and modification time, marked ``credential``. ``ignored`` and ``credential`` mark files
+    another checkout may not have."""
+    if isinstance(value, dict):
+        entry = {"path": rel, "credential": True, "size": value.get("size"), "mtimeNs": value.get("mtimeNs")}
+    else:
+        entry = {"path": rel, "sha256": value}
     if ignored:
         entry["ignored"] = True
-    if is_credential(rel.rsplit("/", 1)[-1]):
-        entry["credential"] = True
     return entry
 
 
 def pin(root: Path, rels, deadline=None) -> list:
     rels = list(rels)
     ignored = git_ignored(root, rels)
-    return [pin_entry(rel, hash_file(root / rel, deadline), rel in ignored) for rel in rels]
+    return [pin_entry(rel, file_pin(root / rel, deadline), rel in ignored) for rel in rels]
 
 
 def receipt_hash(receipt: dict) -> str:
@@ -173,6 +175,8 @@ def list_receipts(root) -> list:
         return []
     entries = []
     for path in folder.glob("*.json"):
+        if is_credential_path(path):  # never a receipt (those are named by their hash), and never opened
+            continue
         try:
             created = json.loads(path.read_text(encoding="utf-8")).get("createdAt") or ""
         except (OSError, ValueError):

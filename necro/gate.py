@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .canon import BudgetExceeded, canonical_json, check_deadline, hash_file, sha256_text
+from .canon import BudgetExceeded, canonical_json, check_deadline, file_pin, sha256_text
 from .lock import LOCK_REL, LockError, build_lock, drift, frozen_paths, lock_hash, read_lock
 from .receipts import SourcesError, build_receipt, git_ignored, pin_entry, source_files, write_receipt
 from .runner import all_pass, run_contracts
@@ -64,16 +64,17 @@ POST_RUN_GRACE_S = 3.0
 
 
 def snapshot(root: Path, lk: dict, files: list, deadline=None) -> tuple:
-    """Hashes of every file a verdict depends on: the frozen files (and any file now under a frozen
+    """Pins of every file a verdict depends on: the frozen files (and any file now under a frozen
     pattern) and every other walked file, ignored by git or not, except declared outputs. Returns
-    (path -> sha256, source paths). A contract run must leave every one of them alone."""
+    (path -> sha256, or {"size", "mtimeNs"} for a credential file, which is never opened; source
+    paths). A contract run must leave every one of them alone."""
     frozen = set(frozen_paths(lk))
     for c in lk.get("contracts", []):
         frozen.update(expand(root, c.get("patterns") or [], strict=False, files=files))
     sources = source_files(root, lk, files=files)
     snap = {}
     for rel in sorted(frozen | set(sources)):
-        snap[rel] = hash_file(root / rel, deadline)
+        snap[rel] = file_pin(root / rel, deadline)
         check_deadline(deadline)
     return snap, sources
 

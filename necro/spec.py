@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
-from .canon import BudgetExceeded, check_deadline  # noqa: F401  (re-exported)
+from .canon import BudgetExceeded, check_deadline, is_credential, is_credential_path  # noqa: F401  (re-exported)
 
 SPEC_NAME = "necro.toml"
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$")
@@ -40,14 +40,10 @@ SKIP_DIRS = {
 }
 SKIP_SUFFIXES = (".pyc", ".pyo")
 SKIP_NAMES = {".DS_Store"}
-# Credential files are hashed like any file (a change to them can change a run), never stored, logged or
-# printed, and marked "credential" in a receipt; another checkout may lack them.
-CREDENTIAL_NAMES = {".env", ".netrc", ".pgpass", ".npmrc", ".pypirc", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"}
-CREDENTIAL_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
-
-
-def is_credential(name: str) -> bool:
-    return name in CREDENTIAL_NAMES or name.startswith(".env.") or name.endswith(CREDENTIAL_SUFFIXES)
+# Credential files (canon.is_credential: .env, .env.*, keys, .netrc and the like) are walked like any
+# file, because a change to one can change a run, but never opened: a receipt pins their presence, size
+# and modification time, marked "credential", and another checkout may lack them. A contract cannot
+# freeze one.
 MAX_FILES = 50000
 CONTRACT_KEYS = {"id", "says", "run", "files", "timeout", "env"}
 TOP_KEYS = {"contract", "sources", "outputs"}
@@ -163,8 +159,9 @@ def expand(root, patterns, strict: bool = False, where: str = "files", files=Non
 
     A pattern is a path relative to the project root or a glob anchored there (``**`` spans
     folders). Caches such as __pycache__ never match. With ``strict`` (freezing) a pattern that
-    matches nothing, or a match that is a link pointing outside the project, raises SpecError;
-    otherwise such links are simply included, so their target is hashed like any file."""
+    matches nothing, a match that is a link pointing outside the project, or a credential file (never
+    opened, so it cannot be frozen by hash) raises SpecError; otherwise such links are simply
+    included, so their target is hashed like any file."""
     root = Path(root).resolve()
     found = set()
     for pattern in patterns:
@@ -184,6 +181,9 @@ def expand(root, patterns, strict: bool = False, where: str = "files", files=Non
         for rel in hits:
             if strict and not _inside(root, root / rel):
                 raise SpecError(f"{where}: '{rel}' points outside the project")
+            if strict and is_credential_path(root / rel):
+                raise SpecError(f"{where}: '{rel}' is a credential file, which Contract Necromancer never opens, so "
+                                "it cannot be frozen. Leave it out of files")
             found.add(rel)
         if strict and not hits:
             raise SpecError(f"{where}: '{pattern}' matches no file")

@@ -7,7 +7,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .canon import hash_file
+from .canon import file_pin, hash_file, is_credential_path
 from .lock import LockError, build_lock, drift, find_root, lock_hash, read_lock
 from .receipts import RECEIPT_KIND, SourcesError, git_ignored, receipt_hash, source_files
 from .runner import run_contracts
@@ -58,6 +58,9 @@ def verify_receipt(receipt_file, cwd=None, budget_s: float | None = None, approv
     path = Path(receipt_file).expanduser()
     if not path.is_absolute():
         path = Path(cwd or os.getcwd()) / path
+    if is_credential_path(path):
+        return _mismatch(f"{path.name} is a credential file, not a receipt, and Contract Necromancer never opens "
+                         "credential files.")
     try:
         rc = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -104,10 +107,14 @@ def verify_receipt(receipt_file, cwd=None, budget_s: float | None = None, approv
     pins = {s["path"]: s for s in rc.get("sources", [])}
     local_only = []  # pins another checkout may lack: files git ignored, and credential files
     for rel, entry in pins.items():
-        now = hash_file(root / rel)
-        if now is None and (entry.get("ignored") or entry.get("credential")):
+        # file_pin decides by the file's name, whatever the receipt says, so a credential file is never
+        # opened; its pin is its size and modification time.
+        now = file_pin(root / rel)
+        want = ({"size": entry.get("size"), "mtimeNs": entry.get("mtimeNs")} if entry.get("credential")
+                else entry.get("sha256"))
+        if now is None and (entry.get("ignored") or is_credential_path(root / rel)):
             local_only.append(rel)
-        elif now != entry.get("sha256"):
+        elif now != want:
             changed.add(rel)
     try:
         present = set(source_files(root, lk))
@@ -136,13 +143,13 @@ def verify_receipt(receipt_file, cwd=None, budget_s: float | None = None, approv
         )
 
     recorded = {c["id"]: c.get("result") for c in rc["contracts"]}
-    before = {rel: hash_file(root / rel) for rel in present}
+    before = {rel: file_pin(root / rel) for rel in present}
     fresh = {r.id: r for r in run_contracts(root, lk, budget_s=budget_s)}
     try:
         after_files = set(source_files(root, lk))
     except SourcesError as exc:
         return _mismatch(str(exc))
-    touched = sorted(rel for rel in present | after_files if hash_file(root / rel) != before.get(rel))
+    touched = sorted(rel for rel in present | after_files if file_pin(root / rel) != before.get(rel))
     touched += sorted(f["path"] for c in rc["contracts"] for f in c.get("files", [])
                       if hash_file(root / f["path"]) != f.get("sha256"))
     if touched:

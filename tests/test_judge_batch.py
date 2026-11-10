@@ -82,8 +82,9 @@ class VerifyInAFreshClone(unittest.TestCase):
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
-    def test_credential_files_are_pinned_by_hash_and_marked(self):
-        # Since the integrity review: hashed (never stored or printed) and marked, so another checkout may lack them.
+    def test_credential_files_are_pinned_by_size_and_mtime_and_marked(self):
+        # Since catalog rule 11 (Nov 10): never opened, so pinned by size and modification time, and marked,
+        # so another checkout may lack them.
         with Project(code=FIXED) as p:
             for name in (".env", ".env.local", "deploy/server.pem", ".netrc"):
                 p.write(name, "dummy")
@@ -91,6 +92,8 @@ class VerifyInAFreshClone(unittest.TestCase):
             pins = {e["path"]: e for e in receipts.pin(p.dir, receipts.source_files(p.dir, lk))}
             for name in (".env", ".env.local", "deploy/server.pem", ".netrc"):
                 self.assertTrue(pins[name].get("credential"), name)
+                self.assertEqual(pins[name]["size"], len("dummy"), name)
+                self.assertNotIn("sha256", pins[name], name)
             self.assertNotIn("credential", pins["tipsplit.py"])
 
 
