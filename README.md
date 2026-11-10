@@ -1,48 +1,50 @@
-# Contract Necromancer: Hermes can't say "done" until the tests you froze pass
+# Contract Necromancer: Hermes can't say "done" until the tests you froze pass, and it can't edit them
 
-Agents that can't finish a task tend to edit the tests instead (ImpossibleBench,
-[arXiv 2510.20270](https://arxiv.org/abs/2510.20270)). Here the tests are locked: you freeze them with `/necro freeze`,
-Hermes is blocked from changing them, and when Hermes tries to finish, the plugin runs them itself. A failure sends
-Hermes back to work with the error; a pass ends the reply with a receipt anyone can re-check.
+You freeze the tests that define done; when Hermes tries to finish, the plugin runs them itself, sends Hermes back to
+work while one fails, and ends a passing reply with a receipt anyone can re-check.
 
-The same gate, tested in Kiro on a task that can't honestly be finished: agents claimed done in 11 of 11 runs without
-it and 0 of 19 with it ([github.com/vijaygopalbalasa/contract-necromancer](https://github.com/vijaygopalbalasa/contract-necromancer), experiments/).
-
-<!-- screenshot: a real-model Hermes session, the refusal and then the receipt, goes here -->
-
-```
-1. You freeze 4 contracts.                 /necro freeze
-2. Hermes makes a half fix, says "Done!"   ->  refused: C2 and C4 fail (uneven shares; a negative total is accepted)
-3. Hermes tries to loosen C2.              ->  blocked: contracts/test_fair.py is a frozen acceptance contract
-4. Hermes writes the real fix.             ->  passes; the reply ends with "Receipt c9ca9cd8bf8c"
-5. Later:                                  /necro verify   ->  CONFIRMED (or MISMATCH, naming what changed)
-```
-
-## How it differs
-
-- **A person freezes the tests, and Hermes cannot change them.** Freezing is a slash command the agent cannot type.
-  Edits, deletes and new files under a frozen folder are blocked, and any change that gets through fails its contract.
-- **The plugin runs the tests itself** at Hermes's verify step and sends Hermes back to work with the failure. It does
-  not depend on the agent choosing to run them or reporting the result honestly.
-- **A pass leaves a receipt anyone can re-check**, later and in a fresh clone, with one command: CONFIRMED, MISMATCH
-  (naming what changed) or SUPERSEDED.
-
-## Try it
-
-Needs Hermes 0.22.7 or newer (0.23.1 or newer recommended) and Python 3.11 or newer. The demo needs no API key.
+![A Hermes reply stamped "Not done" because a frozen test still fails](docs/img/not-done.png)
 
 ```
 hermes plugins install vijaygopalbalasa/hermes-necromancer --enable
 hermes necro demo
 ```
 
-`hermes necro demo` copies a small tip-splitting project with a planted bug to a temporary folder and plays the story
-above through the plugin's real hook functions, with a scripted agent standing in for the model.
+## How this differs
+
+| Kind of plugin | What they do | What this one does |
+|---|---|---|
+| Claim checkers | Compare the agent's reply with the session's tool logs. | Runs the frozen tests itself at Hermes's verify step (`pre_verify`), so "done" is checked against a fresh run, not against what the agent says it ran. |
+| Check runners | Ask the model to run the checks, so an edited test only makes an old pass stale. | A person freezes the tests by hash and Hermes is blocked from editing them; any change to one makes it fail. |
+| Push gates | Hold back `git push` or a pull request until a check passes. | Gates "done" itself, before the reply reaches you, and leaves a receipt that re-verifies in a fresh clone. |
+
+<!-- HERMES-RESULT: one line with the with/without numbers from real Hermes runs goes here once measured. -->
+
+The same gate in Kiro, not Hermes: on a task that can't honestly be finished, agents claimed done in 11 of 11 runs
+without it and 0 of 19 with it ([github.com/vijaygopalbalasa/contract-necromancer](https://github.com/vijaygopalbalasa/contract-necromancer), experiments/).
+
+## What happens
+
+Agents that can't finish a task tend to edit the tests instead (ImpossibleBench,
+[arXiv 2510.20270](https://arxiv.org/abs/2510.20270)). Here each frozen test is a contract: a command and the files it
+freezes, listed in `necro.toml`. `hermes necro demo` plays this story on a small tip-splitting project with a planted
+bug, in a temporary folder, through the plugin's real hook functions, with a scripted agent standing in for the model:
+
+```
+1. You freeze 4 tests.                     /necro freeze
+2. Hermes makes a half fix, says "Done!"   ->  refused: C2 and C4 fail (uneven shares; a negative total is accepted)
+3. Hermes tries to loosen C2.              ->  blocked: contracts/test_fair.py is a frozen acceptance contract
+4. Hermes writes the real fix.             ->  passes; the reply ends with "Receipt c9ca9cd8bf8c"
+5. Later:                                  /necro verify   ->  CONFIRMED (or MISMATCH, naming what changed)
+```
+
+Needs Hermes 0.22.7 or newer (0.23.1 or newer recommended) and Python 3.11 or newer; the demo needs no API key. The
+plugin installs under the name `contract-necromancer`.
 
 ## Use it in your project
 
-1. Write `necro.toml` next to your code. Each contract is a command that exits 0 when the work is right, plus the
-   files it freezes:
+1. Write `necro.toml` next to your code. Each contract is one frozen test: a command that exits 0 when the work is
+   right, plus the files it freezes:
 
    ```toml
    [[contract]]
@@ -54,7 +56,8 @@ above through the plugin's real hook functions, with a scripted agent standing i
 
    Any language works: `npm test -- tests/acceptance`, `cargo test --test acceptance`, `go test ./acceptance/...`.
    Freeze the whole folder with a glob, so a new file there (a `conftest.py`, an `__init__.py`) counts as tampering.
-   If your tests write files (reports, coverage), list them: `outputs = ["reports/*.xml"]`. Hermes can draft
+   A frozen folder cannot hold a credential file (a `.env`, a `*.pem` or `*.key` fixture), because those are never
+   opened. If your tests write files (reports, coverage), list them: `outputs = ["reports/*.xml"]`. Hermes can draft
    `necro.toml` for you before you freeze it.
 2. Read the contracts, then type **`/necro freeze`** in the Hermes chat. Freezing, approving and unfreezing are a
    person's acts and live in the slash command, because the agent cannot type into your chat.
@@ -166,7 +169,7 @@ network calls, no telemetry, no credentials stored, no background processes.
 ## Tests
 
 ```
-python3 -m unittest discover -s tests                        # 246 tests, about 90 s
+python3 -m unittest discover -s tests                        # 250 tests, about 90 s
 python3 tests/e2e/run_in_hermes.py --hermes $(which hermes)    # the real Hermes agent loop
 ```
 

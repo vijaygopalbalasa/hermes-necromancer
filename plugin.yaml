@@ -1,6 +1,6 @@
 name: contract-necromancer
 version: "0.1.0"
-description: "Hermes cannot call coding work done while a frozen acceptance contract fails. A person freezes the contracts by hash; at the verify gate the plugin runs them and keeps the agent working, naming what fails; edits to frozen files are blocked; the final reply says Not done, or carries a receipt anyone can re-check."
+description: "Hermes can't say done until the tests you froze pass, and it can't edit them. A person freezes the tests (contracts) by hash; at the verify step the plugin runs them itself and keeps Hermes working, naming what fails; the final reply says Not done, or carries a receipt anyone can re-check in a fresh clone."
 author: Vijaygopal Balasa (vijaygopalbalasa)
 license: MIT
 homepage: https://github.com/vijaygopalbalasa/hermes-necromancer
