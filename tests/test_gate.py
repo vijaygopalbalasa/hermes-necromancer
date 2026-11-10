@@ -109,7 +109,7 @@ class Messages(unittest.TestCase):
             self.assertTrue(out.startswith("Not done."), out)
             self.assertIn("C2", out)
             self.assertIn("All done, the bill splits correctly.", out)
-            self.assertNotIn("—", out)
+            self.assertNotIn("\u2014", out)  # no em dash
 
     def test_stamp_on_success_appends_the_receipt(self):
         with Project(code=FIXED) as p:
@@ -119,7 +119,7 @@ class Messages(unittest.TestCase):
             self.assertTrue(out.startswith("Fixed it."))
             self.assertIn(v.receipt_hash[:12], out)
             self.assertIn("necro verify", out)
-            self.assertNotIn("—", out)
+            self.assertNotIn("\u2014", out)  # no em dash
 
 
 class DoneClaims(unittest.TestCase):
