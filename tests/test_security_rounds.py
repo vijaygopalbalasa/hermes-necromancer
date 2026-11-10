@@ -196,6 +196,13 @@ class R2ApprovalStore(unittest.TestCase):
             self.assertEqual(out["action"], "continue")
             self.assertIn("approvals were changed outside necro", out["message"])
 
+    def test_status_says_when_the_approval_record_was_changed(self):
+        with Project(code=FIXED) as p:
+            ctx, _ = ctx_for(p)
+            ctx.commands["necro"]("freeze")
+            ctx.state.data["approved_roots"][str(p.dir)]["lock"] = "0" * 64
+            self.assertIn("changed outside necro", ctx.commands["necro"]("status"))
+
     def test_a_deleted_key_makes_every_approval_untrusted(self):
         with Project(code=FIXED) as p:
             ctx, _ = ctx_for(p)

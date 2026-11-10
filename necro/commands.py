@@ -23,6 +23,7 @@ from .verify import verify_receipt
 PERSON_CHECK_BUDGET = 900.0
 
 USAGE = """Contract Necromancer: Hermes cannot call coding work done while a frozen acceptance contract fails.
+Freeze, approve and unfreeze with /necro inside Hermes; from a shell they refuse unless a person is clearly typing.
 
   status            what is frozen here, and the latest receipt
   freeze            a person freezes the contracts in necro.toml (by hash); best typed as /necro freeze
@@ -164,7 +165,11 @@ def status(cwd, approvals: Approvals) -> tuple:
     except LockError as exc:
         return f"{root}: {exc}", 1
     digest = lock_hash(lk)
-    approved = "yes" if approvals.approved_here(root, digest) else "no (run /necro approve after reading it)"
+    record = (approvals.mapping() or {}).get(str(root)) if approvals.store is not None else digest
+    if record == APPROVAL_TAMPERED:
+        approved = "no: its approval record was changed outside necro (run /necro freeze again)"
+    else:
+        approved = "yes" if record == digest else "no (run /necro approve after reading it)"
     lines = [f"Frozen contracts in {root} (lock {digest[:12]}, frozen {lk.get('frozenAt', '?')}, approved here: {approved}):"]
     lines += _contract_lines(lk)
     d = drift(root, lk)
