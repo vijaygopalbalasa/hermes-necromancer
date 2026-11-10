@@ -21,7 +21,7 @@ FILE_TOOLS = {"write_file", "patch"}
 V4A_FILE = re.compile(r"^\*\*\*\s*(?:Update|Add|Delete)\s+File:\s*(.+)$", re.MULTILINE)
 V4A_MOVE = re.compile(r"^\*\*\*\s*Move\s+File:\s*(.+?)\s*->\s*(.+)$", re.MULTILINE)
 PERSON_ONLY = {"freeze", "unfreeze", "approve"}
-SEGMENT_SPLIT = re.compile(r"\|\||&&|[;|\n]")
+SEGMENT_SPLIT = re.compile(r"\|\||&&|[;|&\n]")
 REDIRECT = re.compile(r"(?<![<>&0-9])(?:\d|&)?>>?\|?\s*([^\s;|&<>]+)")
 WRITE_COMMANDS = {
     "rm", "mv", "tee", "truncate", "chmod", "chown", "ln", "unlink", "dd", "touch", "shred", "patch",
@@ -236,32 +236,48 @@ def _command_name(words: list) -> tuple:
         i += 1
     if i >= len(words):
         return "", []
-    return os.path.basename(words[i]), words[i + 1:]
+    return os.path.basename(_bare(words[i])), words[i + 1:]
 
 
-FIND_RUNNERS = {"-exec", "-execdir", "-ok", "-okdir"}
-FIND_WRITERS = {"-delete", "-fprint", "-fprint0", "-fprintf", "-fls"}
 FIND_READ_ONLY = {"grep", "cat", "head", "tail", "wc", "ls", "stat", "file"}
+FIND_WORD = re.compile(r"(?:^|[^a-z0-9_./-])g?find\b")
+FIND_WRITES = re.compile(r"-(?:delete|fprint0|fprintf|fprint|fls)\b")
+FIND_RUNS = re.compile(r"(?:^|\s)-(?:execdir|exec|okdir|ok)\b(?:\s+(\S+))?")
 FIND_BLOCK = ("Blocked by Contract Necromancer: a find that deletes, writes or runs a program other than a read-only "
-              "one is not allowed over a frozen project ({root}). Name the files you mean one by one; the frozen "
+              "one is not allowed in or over a frozen project ({root}). Name the files you mean one by one; the frozen "
               "contracts and .necro stay.")
 
 
-def _find_is_destructive(args: list) -> bool:
-    """An allowlist: a find writes when it deletes or prints to a file, or runs any program that is not a
-    plain reader (grep, cat, head, tail, wc, ls, stat, file)."""
-    if any(a in FIND_WRITERS for a in args):
+def _find_text_writes(text: str) -> bool:
+    """One fail-closed text rule, no parsing: the word find (or gfind) anywhere, together with -delete or a
+    -fprint/-fls action, or with -exec/-execdir/-ok/-okdir not followed by exactly grep, cat, head, tail,
+    wc, ls, stat or file (case-sensitive, so a path or GREP counts as writing)."""
+    low = text.lower()
+    if not FIND_WORD.search(low):
+        return False
+    if FIND_WRITES.search(low):
         return True
-    for i, a in enumerate(args):
-        if a in FIND_RUNNERS:
-            program = args[i + 1] if i + 1 < len(args) else ""
-            if "/" in program or program.lower() not in FIND_READ_ONLY:  # a path could be any script
-                return True
-    return False
+    return any(m.group(1) not in FIND_READ_ONLY for m in FIND_RUNS.finditer(text))
+
+
+def _frozen_near(wd: str, frozen_roots=()) -> Path | None:
+    """The frozen project that ``wd`` sits in, or one below it (a find from above would reach it)."""
+    if not wd:
+        return None
+    here = Path(os.path.realpath(wd))
+    root = find_root(here)
+    if root is not None:
+        return root
+    for r in frozen_roots or ():
+        r = Path(r)
+        if here == r or here in r.parents or r in here.parents:
+            return r
+    return None
 
 
 def _bare(token: str) -> str:
-    """A token without the shell syntax wrapped around it: $( ( ) { } backticks, quotes and ;."""
+    """A token without the shell syntax wrapped around it: $( ( ) { } backticks, quotes and ;. Used only to
+    spot a command's name."""
     while True:
         before = token
         if token.startswith("$("):
@@ -269,49 +285,6 @@ def _bare(token: str) -> str:
         token = token.lstrip("({`\"'").rstrip(")}`\"';")
         if token == before:
             return token
-
-
-def _tokens(text: str) -> list:
-    """The words of a command, plus the words of any word that is itself a command (an `sh -c` payload).
-    Deliberately simple: no parser, just one extra level."""
-    words = _words(text)
-    out = list(words)
-    for w in words:
-        if any(ch.isspace() for ch in w):
-            out.extend(_words(w))
-    return out
-
-
-def _find_starts(args: list) -> list:
-    """The start folders of a find command line (after -H, -L, -P, -O<n> and -D <opts>)."""
-    i, starts = 0, []
-    while i < len(args) and args[i] in ("-H", "-L", "-P", "-D") or (i < len(args) and re.match(r"^-O\d$", args[i])):
-        i += 2 if args[i] == "-D" else 1
-    for a in args[i:]:
-        if a.startswith(("-", "(", "!")):
-            break
-        starts.append(a)
-    return starts or ["."]
-
-
-def _find_block(args: list, wd: str, frozen_roots) -> str | None:
-    """Any destructive find whose start folder is a frozen project's root, contains it, or sits inside
-    it is blocked, whatever its -name filters say."""
-    if not _find_is_destructive(args):
-        return None
-    candidates = {Path(r) for r in frozen_roots or ()}
-    here = find_root(wd) if wd else None
-    if here:
-        candidates.add(here)
-    for start in _find_starts(args):
-        target = _resolve(start, wd)
-        up = find_root(target)
-        if up:
-            candidates.add(up)
-        for root in candidates:
-            if target == root or root in target.parents or target in root.parents:
-                return FIND_BLOCK.format(root=root)
-    return None
 
 
 def _code_writes(low_text: str, spellings: set) -> bool:
@@ -330,22 +303,13 @@ def _code_writes(low_text: str, spellings: set) -> bool:
     return False
 
 
-def _inside_frozen(wd: str, frozen_roots=()) -> bool:
-    if not wd:
-        return False
-    here = Path(os.path.realpath(wd))
-    if find_root(here) is not None:
-        return True
-    return any(here == Path(r) or Path(r) in here.parents for r in frozen_roots or ())
-
-
 def _shell_block(cmd: str, wd: str, store_dir: str | None, frozen_roots=()) -> str | None:
     full_low = cmd.lower()
     if len(cmd) > MAX_TEXT:
         root = find_root(wd) if wd else None
         lk = _lock_for(root) if root else None
         frozen = [rel for rel in (frozen_paths(lk) if lk else ()) if rel.lower() in full_low]
-        if (_inside_frozen(wd, frozen_roots) or "necro" in full_low or frozen
+        if (_frozen_near(wd, frozen_roots) is not None or "necro" in full_low or frozen
                 or any(n in full_low for n in _store_needles(store_dir))):
             return TOO_LONG_BLOCK
         cmd = cmd[:MAX_TEXT]
@@ -370,13 +334,9 @@ def _shell_block(cmd: str, wd: str, store_dir: str | None, frozen_roots=()) -> s
             r = find_root(_resolve(token, wd))
             if r and r not in roots:
                 roots.append(r)
-    for chunk in [cmd] + SEGMENT_SPLIT.split(cmd):
-        tokens = [_bare(t) for t in _tokens(chunk)]
-        for i, token in enumerate(tokens):
-            if os.path.basename(token).lower() in ("find", "gfind"):
-                msg = _find_block(tokens[i + 1:], wd, frozen_roots)
-                if msg:
-                    return msg
+    near = _frozen_near(wd, frozen_roots)
+    if near is not None and _find_text_writes(cmd):
+        return FIND_BLOCK.format(root=near)
     for root in roots:
         lk = _lock_for(root)
         if not lk:
@@ -420,9 +380,12 @@ def _code_block(code: str, cwd: str, store_dir: str | None, frozen_roots=()) -> 
     lk = _lock_for(root) if root else None
     if len(code) > MAX_TEXT:
         named = lk and _mentions(low, root, lk, cwd)
-        return TOO_LONG_BLOCK if (_inside_frozen(cwd, frozen_roots) or "necro" in low or named) else None
+        return TOO_LONG_BLOCK if (_frozen_near(cwd, frozen_roots) is not None or "necro" in low or named) else None
     if _person_only_text(low):
         return PERSON_BLOCK
+    near = _frozen_near(cwd, frozen_roots)
+    if near is not None and _find_text_writes(code):
+        return FIND_BLOCK.format(root=near)
     if root is None or not lk:
         return None
     for rel in _mentions(low, root, lk, cwd):

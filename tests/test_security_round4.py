@@ -153,8 +153,8 @@ class FindOverAFrozenProject(unittest.TestCase):
     def test_read_only_finds_and_finds_elsewhere_are_allowed(self):
         self.assertFalse(self.blocked("find . -name '*.py' -print"))
         self.assertFalse(self.blocked("find . -name '*.py' -exec grep -n split {} +"))
-        with Project() as other:
-            self.assertFalse(self.blocked(f"find {other.dir} -name '*.tmp' -delete"))
+        with Project() as other:  # typed from outside any frozen project, pointing elsewhere
+            self.assertFalse(self.blocked(f"find {other.dir} -name '*.tmp' -delete", wd=other.dir))
 
 
 class Round5(unittest.TestCase):
@@ -217,6 +217,33 @@ class FindTokenEdges(unittest.TestCase):
         for cmd in ("echo $(find . -delete)", "echo `find . -delete`", "(find . -delete)", "{ find . -delete; }",
                     "echo \"$(find . -delete)\""):
             self.assertTrue(self.blocked(cmd), cmd)
+
+
+class FindTextRule(unittest.TestCase):
+    """The final guard rule (Nov 10): no token parsing for find, one fail-closed text check."""
+
+    def setUp(self):
+        self.p = Project(code=FIXED)
+        lock.freeze(self.p.dir)
+
+    def tearDown(self):
+        self.p.cleanup()
+
+    def blocked(self, cmd):
+        return guard.check_tool_call("terminal", {"command": cmd}, str(self.p.dir)) is not None
+
+    def test_command_substitution(self):
+        self.assertTrue(self.blocked("echo $(find . -delete)"))
+
+    def test_no_spaces_around_and(self):
+        self.assertTrue(self.blocked("x=1&&find . -delete"))
+
+    def test_read_only_names_are_exact_and_case_sensitive(self):
+        self.assertTrue(self.blocked("find . -name '*.py' -exec GREP -n x {} +"))
+        self.assertFalse(self.blocked("find . -name '*.py' -exec grep -n x {} +"))
+
+    def test_a_path_is_never_a_read_only_name(self):
+        self.assertTrue(self.blocked("find . -name '*.py' -exec ./grep -n x {} +"))
 
 
 if __name__ == "__main__":
