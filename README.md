@@ -150,7 +150,7 @@ calls, no telemetry, no credentials, no background processes.
 ## Tests
 
 ```
-python3 -m unittest discover -s tests                        # 171 tests, about 50 s
+python3 -m unittest discover -s tests                        # 172 tests, about 50 s
 python3 tests/e2e/run_in_hermes.py --hermes $(which hermes)    # the real Hermes agent loop
 ```
 
