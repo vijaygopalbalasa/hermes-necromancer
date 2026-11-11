@@ -68,6 +68,8 @@ then /necro freeze. See where it stands: /necro check.
 If it finds no test files, can't tell how to run them, or the command can't run here (say `python3` cannot import
 pytest), it locks nothing and says what to do instead. To use your own test command, put it after freeze:
 `/necro freeze npm run test:unit`. A script the command names, such as `./run-tests.sh`, is locked with it.
+Locked means fixed for everyone: Hermes can't add a test file to a frozen folder either (a new file in `tests/`
+counts as tampering), and your own edits to the tests count as tampering until you type `/necro freeze` again.
 Freezing, approving and unfreezing are a person's acts and live in the slash command, because the agent cannot type
 into your chat. Work with Hermes as usual, and commit `necro.toml`, `.necro/lock.json` and `.necro/receipts/` with
 your code.
@@ -180,7 +182,8 @@ Under `plugins.entries.contract-necromancer.settings`: `gate_budget_seconds` (25
 - **`/necro freeze` locks test files, not settings.** Without a `necro.toml`, it freezes the test files it finds, not
   `package.json`, `pyproject.toml`, `pytest.ini`, `setup.cfg` or `Cargo.toml`, which can change which tests run (an
   edited `scripts.test`, or pytest `addopts`). Such an edit is pinned in the receipt but not blocked. To lock one, add
-  it to `files` in `necro.toml` and type `/necro freeze` again.
+  it to `files` in `necro.toml` and type `/necro freeze` again. When a test folder holds a link or a credential file
+  (which are never frozen), its other files are locked by name, so a file added there later is not caught.
 - **What tests can see.** Code under test runs inside the test runner and can tamper with it. A file in the
   project that changes how a test runs (a `unittest.py` that shadows Python's own, even one git ignores) can make a
   local run pass; it is pinned and listed in the receipt, and `verify --run` in a fresh clone, which lacks it, fails.
