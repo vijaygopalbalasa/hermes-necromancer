@@ -119,11 +119,17 @@ def find_root(start) -> Path | None:
         p = Path(start).expanduser().resolve()
     except (OSError, RuntimeError):
         return None
-    if not p.is_dir():
+    try:
+        if not p.is_dir():
+            p = p.parent
+    except OSError:  # a name too long to stat: Python 3.11's pathlib raises where 3.14 says False
         p = p.parent
     for d in (p, *p.parents):
-        if (d / LOCK_REL).is_file():
-            return d
+        try:
+            if (d / LOCK_REL).is_file():
+                return d
+        except OSError:
+            continue
     return None
 
 

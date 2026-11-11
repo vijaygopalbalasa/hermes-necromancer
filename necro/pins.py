@@ -71,6 +71,17 @@ def _segments(field: str, text: str) -> list:
     raise PinError(f"'{text}': '{field}' is not a dotted path")
 
 
+def _plain(value):
+    """TOML dates and times as ISO text, so a pinned value always hashes."""
+    if isinstance(value, dict):
+        return {k: _plain(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_plain(v) for v in value]
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return value
+
+
 def _dig(data, segs):
     if not segs:
         return data
@@ -129,7 +140,7 @@ def _field_value(root: Path, file: str, field: str):
             return ["field", {k: parser.get(section, k, raw=True) for k in parser.options(section)}]
     except (ValueError, configparser.Error) as exc:
         raise PinError(f"{file} cannot be read as {fmt} ({str(exc)[:160]})") from None
-    return ["field", _dig(data, _segments(field, file + "#" + field))]
+    return ["field", _plain(_dig(data, _segments(field, file + "#" + field)))]
 
 
 def _file_value(root: Path, rel: str):

@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .canon import BudgetExceeded, canonical_json, check_deadline, file_pin, sha256_text
 from .lock import LOCK_REL, LockError, build_lock, drift, frozen_paths, lock_hash, read_lock
+from .pins import PinError, observe
 from .receipts import SourcesError, build_receipt, escaping_links, git_ignored, pin_entry, source_files, write_receipt
 from .runner import all_pass, run_contracts
 from .spec import SpecError, expand, walk_files
@@ -76,6 +77,14 @@ def snapshot(root: Path, lk: dict, files: list, deadline=None) -> tuple:
     for rel in sorted(frozen | set(sources)):
         snap[rel] = file_pin(root / rel, deadline)
         check_deadline(deadline)
+    # What each pin sees, so a changed setting in a file outside sources = [...] still changes the digest.
+    for c in lk.get("contracts", []):
+        for entry in c.get("pins") or []:
+            text = entry.get("pin", "")
+            try:
+                snap[f"pin {text}"] = sha256_text(canonical_json(observe(root, text, files)))
+            except PinError as exc:
+                snap[f"pin {text}"] = f"unreadable: {exc}"
     return snap, sources
 
 
@@ -150,7 +159,7 @@ def evaluate(root, *, budget_s: float | None = None, deadline: float | None = No
                             "its target must be a file in the project; a person removes the link or points it at one")
         key = str(root)
         hit = cache.get(key) if cache is not None else None
-        if hit and hit["lock"] == lh and _digest(lh, before) == hit["digest"]:
+        if hit and hit["lock"] == lh and not d.contracts and _digest(lh, before) == hit["digest"]:
             results, after, cached = hit["results"], before, True
             sources = source_files(root, lk, files=files)
         else:

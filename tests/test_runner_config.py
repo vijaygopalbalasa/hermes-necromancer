@@ -233,3 +233,32 @@ class RunAtFreeze(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PinsAndTheCache(unittest.TestCase):
+    """Review, Nov 11: a pinned file outside sources = [...] is not in the gate's snapshot, so a cached pass
+    must not survive a change to a pin."""
+
+    def test_a_pin_change_is_caught_even_when_sources_leave_the_file_out(self):
+        from test_plugin import FakeCtx, load_plugin
+        toml = 'sources = ["src/**"]\n' + spec(["package.json#scripts.test"])
+        with Folder({"src/a.js": "", "tests/a.test.js": "", "package.json": json.dumps(PACKAGE), "necro.toml": toml}) as f:
+            ctx = FakeCtx(f.dir)
+            load_plugin().register(ctx)
+            self.assertIn("Froze 1 contract", ctx.commands["necro"]("freeze"))
+            fire = lambda: ctx.hooks["pre_verify"](session_id="s", platform="cli", model="m", coding=True,  # noqa: E731
+                                                   attempt=0, final_response="Done", changed_paths=[str(f.path("src/a.js"))])
+            self.assertIsNone(fire())  # passes, and the pass is cached
+            f.write("package.json", json.dumps({**PACKAGE, "scripts": {"test": "exit 0"}}))
+            out = fire()
+            self.assertIsNotNone(out, "a cached pass outlived a changed pin")
+            self.assertIn("the test command in package.json changed (scripts.test)", out["message"])
+
+    def test_a_date_in_a_pinned_toml_table_is_fine(self):
+        pyproject = '[tool.pytest.ini_options]\naddopts = "-q"\nsince = 2026-11-11\n'
+        with Folder({"tests/test_a.py": "", "pyproject.toml": pyproject,
+                     "necro.toml": spec(["pyproject.toml#tool.pytest"])}) as f:
+            approvals = frozen(f)
+            self.assertTrue(verdict(f, approvals).ok)
+            f.write("pyproject.toml", pyproject.replace("2026-11-11", "2026-11-12"))
+            self.assertIn("the pytest settings in pyproject.toml changed (tool.pytest)", reasons(verdict(f, approvals)))
