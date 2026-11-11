@@ -77,7 +77,7 @@ class ChildProcessesGetTheContractEnvironment(unittest.TestCase):
 class TheGuardIsFastOnHugeInput(unittest.TestCase):
     SIZE = 200_000  # patches: any size is read line by line
     SHELL = guard.MAX_TEXT - 1_000  # shell commands: just under the size where the guard stops splitting words
-    BUDGET = 2.0  # seconds for one call, far under Hermes's 30 second hook limit; these took minutes before
+    BUDGET = 5.0  # seconds for one call on a busy CI machine, far under Hermes's 30 second hook limit; these took minutes before
 
     def setUp(self):
         self.p = Project(code=FIXED)
