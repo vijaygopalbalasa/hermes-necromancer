@@ -441,6 +441,7 @@ def _one(root: Path, words: list, sh: Shape, have: set, top: bool, depth: int, s
         return
     exe, args = words[0], words[1:]
     prog = os.path.basename(exe)
+    pinned_exe = False  # this invocation's own program was pinned as a named venv python
     if top and "/" in exe:
         rel = _rel(root, exe)
         hidden = _hidden_in(rel) if rel else None
@@ -450,6 +451,7 @@ def _one(root: Path, words: list, sh: Shape, have: set, top: bool, depth: int, s
             sh.venv, sh.venv_python = hidden, rel
             sh.add("pins", f"{hidden}/pyvenv.cfg")
             sh.add("pins", rel)
+            pinned_exe = True
         elif hidden:
             rest = " ".join(args)
             venv = project_python(root)
@@ -485,7 +487,7 @@ def _one(root: Path, words: list, sh: Shape, have: set, top: bool, depth: int, s
     for name in RUNNER_FILES.get(prog, ()):
         if name in have and _freezable(root, name):
             sh.add("files", name)
-    for word in ([exe] if "/" in exe and not (top and sh.venv_python) else []) + args:  # a named venv python is pinned
+    for word in ([exe] if "/" in exe and not pinned_exe else []) + args:
         if word.startswith("-"):
             if "=" not in word:
                 continue

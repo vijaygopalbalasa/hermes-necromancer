@@ -470,5 +470,20 @@ class TheNamedVenvIsPinned(unittest.TestCase):
             self.assertIn("changed since freeze: .venv/pyvenv.cfg", reasons(verdict(f, approvals)))
 
 
+
+class EachInvocationOnItsOwn(unittest.TestCase):
+    """Review, Nov 11: a pinned venv python in one invocation must not stop another invocation's script from
+    being locked."""
+
+    def test_a_script_after_the_venv_python_is_still_locked(self):
+        with Folder({"tests/test_a.py": "import pytest\n", ".venv/bin/python": "", "check.sh": "#!/bin/sh\nexit 0\n"}) as f:
+            os.chmod(f.path("check.sh"), 0o755)
+            with mock.patch.object(detect, "runner_problem", no_runner_problem), \
+                    mock.patch.object(commands, "right_now", not_run):
+                text, code = run(f, 'freeze sh -c ".venv/bin/python -m pytest -q && ./check.sh"')
+            self.assertEqual(code, 0, text)
+            self.assertIn("check.sh", lock.read_lock(f.dir)["contracts"][0]["patterns"])
+
+
 if __name__ == "__main__":
     unittest.main()
