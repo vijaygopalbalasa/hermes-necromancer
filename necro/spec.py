@@ -10,6 +10,7 @@
     files = ["tests/acceptance/test_split.py"]                    # the files this contract freezes
     timeout = 120                      # optional, seconds
     env = ["DATABASE_URL"]             # optional: variables passed through to the command
+    pins = ["package.json#scripts.test"]   # optional: settings that shape the run (see pins.py)
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from .canon import BudgetExceeded, check_deadline, is_credential, is_credential_path  # noqa: F401  (re-exported)
+from .pins import PinError, split_pin
 
 SPEC_NAME = "necro.toml"
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$")
@@ -45,7 +47,7 @@ SKIP_NAMES = {".DS_Store"}
 # and modification time, marked "credential", and another checkout may lack them. A contract cannot
 # freeze one.
 MAX_FILES = 50000
-CONTRACT_KEYS = {"id", "says", "run", "files", "timeout", "env"}
+CONTRACT_KEYS = {"id", "says", "run", "files", "timeout", "env", "pins"}
 TOP_KEYS = {"contract", "sources", "outputs"}
 
 
@@ -129,6 +131,7 @@ class Contract:
     files: list = field(default_factory=list)
     timeout: int | None = None
     env: list = field(default_factory=list)
+    pins: list = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -225,7 +228,16 @@ def _contract(raw, index: int, root: Path) -> Contract:
     env = raw.get("env", [])
     if not isinstance(env, list) or not all(isinstance(e, str) and ENV_RE.match(e) for e in env):
         raise SpecError(f"{where}: 'env' must be a list of variable names")
-    return Contract(id=cid, says=says.strip(), run=run.strip(), files=list(files), timeout=timeout, env=list(env))
+    pins = raw.get("pins", [])
+    if not isinstance(pins, list):
+        raise SpecError(f"{where}: 'pins' must be a list of settings, such as \"package.json#scripts.test\"")
+    for pin in pins:
+        try:
+            split_pin(pin)
+        except PinError as exc:
+            raise SpecError(f"{where}: {exc}") from None
+    return Contract(id=cid, says=says.strip(), run=run.strip(), files=list(files), timeout=timeout, env=list(env),
+                    pins=list(pins))
 
 
 def load_spec(root) -> Spec:

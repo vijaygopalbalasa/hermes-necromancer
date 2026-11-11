@@ -225,24 +225,45 @@ def continue_message(v: Verdict) -> str:
     return "\n".join(lines)
 
 
-def stamp(v: Verdict, text: str) -> str:
-    """The final reply as the person sees it: failures lead, a receipt follows a pass."""
+def sent_back_line(refusals) -> str:
+    """'Sent back once: C1 failed after Hermes said done.' or 'Sent back 2 times: C1 failed, then C1 again.'
+    Each refusal is the list of contract ids that failed then (empty when the check could not run)."""
+    refusals = [list(r or []) for r in refusals or []]
+    if not refusals:
+        return ""
+    def name(ids):
+        if not ids:
+            return "the check"
+        return ids[0] if len(ids) == 1 else ", ".join(ids[:-1]) + " and " + ids[-1]
+    if len(refusals) == 1:
+        return f"Sent back once: {name(refusals[0])} failed after Hermes said done."
+    parts = [f"{name(refusals[0])} failed"]
+    for before, now in zip(refusals, refusals[1:]):
+        parts.append(f"then {name(now)}{' again' if now == before else ''}")
+    return f"Sent back {len(refusals)} times: {', '.join(parts)}."
+
+
+def stamp(v: Verdict, text: str, sent_back=()) -> str:
+    """The final reply as the person sees it: failures lead, a receipt follows a pass. ``sent_back`` lists the
+    turn's refusals, which the person would not otherwise see (Hermes keeps the pre_verify note to itself)."""
     text = text or ""
+    line = sent_back_line(sent_back)
+    lead = f"{line} " if line else ""
     if v.ok:
         rel = os.path.relpath(v.receipt_path, v.root) if v.receipt_path else ".necro/receipts"
         passed = ("the frozen acceptance contract passes" if len(v.results) == 1
                   else f"all {len(v.results)} frozen acceptance contracts pass")
-        return (f"{text.rstrip()}\n\n{LABEL}: {passed}. "
+        return (f"{text.rstrip()}\n\n{lead}{LABEL}: {passed}. "
                 f"Receipt {v.receipt_hash[:12]}; anyone can re-check it with `hermes necro verify {rel}`.")
     fails = v.failing()
     if fails:
         parts = "; ".join(f"{r.id} {WORD.get(r.status, r.status)}" + (f" ({r.says})" if r.says else "") for r in fails)
         n, total = len(fails), len(v.results)
-        head = f"Not done. {LABEL}: {n} of {total} frozen acceptance contracts did not pass: {parts}."
+        head = f"Not done. {lead}{LABEL}: {n} of {total} frozen acceptance contracts did not pass: {parts}."
         if v.problems:
             head += " Also: " + "; ".join(v.problems) + "."
     else:
-        head = f"Not done. {LABEL} could not confirm the frozen contracts: " + "; ".join(v.problems) + "."
+        head = f"Not done. {lead}{LABEL} could not confirm the frozen contracts: " + "; ".join(v.problems) + "."
     return f"{head} No receipt was written.\n\n{text}"
 
 

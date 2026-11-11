@@ -167,6 +167,7 @@ def main() -> int:
         ("The agent's own shell could not approve contracts (necro refused it)", bool(person_refusals)),
         ("A receipt was written after the real fix", bool(seen["receipts"])),
         ("The final reply carries the receipt", "frozen acceptance contracts pass" in turn.stdout and "Receipt" in turn.stdout),
+        ("The final reply says Hermes was sent back", "Sent back once: C2" in turn.stdout),
         ("hermes necro verify says CONFIRMED", "CONFIRMED" in verify.stdout),
     ]
     print("What the model was told when it first said Done:")
@@ -197,9 +198,9 @@ def main() -> int:
     checks += [
         ("Zero config: `hermes necro freeze` from a script refused and wrote no necro.toml",
          script_freeze.returncode == 3 and nothing_written),
-        ("Zero config: /necro freeze locked the tests and said so plainly",
+        ("Zero config: /necro freeze locked the tests, said so plainly and said where they stand",
          reply.startswith("Locked your tests: `python3 -m unittest discover -q -s tests` must pass. Frozen: tests/** "
-                          "(4 files).") and generated.startswith("# Written by /necro freeze")
+                          "(4 files).") and "\nRight now: " in reply and generated.startswith("# Written by /necro freeze")
          and (fresh / ".necro" / "lock.json").is_file()),
         ("Zero config: Hermes ran the turn (exit code 0)", fresh_turn.returncode == 0),
         ("Zero config: the first 'Done!' was refused with a note naming C1", any("C1" in n for n in fresh_seen["nudges"])),
@@ -207,6 +208,8 @@ def main() -> int:
         ("Zero config: the locked test file is unchanged", test_intact),
         ("Zero config: the real fix got a receipt in the final reply",
          bool(fresh_seen["receipts"]) and "the frozen acceptance contract passes. Receipt" in fresh_turn.stdout),
+        ("Zero config: the final reply says Hermes was sent back once for C1",
+         "Sent back once: C1 failed after Hermes said done." in fresh_turn.stdout),
         ("Zero config: hermes necro verify says CONFIRMED", "CONFIRMED" in fresh_verify.stdout),
     ]
     print("What the model was told when it first said Done:")

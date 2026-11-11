@@ -38,9 +38,11 @@ class Outputs(unittest.TestCase):
             self.assertTrue(v.ok, v.problems)
 
     def test_the_default_ignore_list_is_documented(self):
-        readme = (REPO / "README.md").read_text()
+        # The full list moved from the README to docs/security.md on Nov 11; the README links to it.
+        doc = (REPO / "docs" / "security.md").read_text()
         for name in sorted(spec.SKIP_DIRS):
-            self.assertIn(f"`{name}`", readme, name)
+            self.assertIn(f"`{name}`", doc, name)
+        self.assertIn("docs/security.md", (REPO / "README.md").read_text())
 
 
 class OverLongInput(unittest.TestCase):

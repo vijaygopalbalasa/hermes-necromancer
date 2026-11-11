@@ -15,7 +15,7 @@ from pathlib import Path
 
 from . import detect
 from .canon import utc_now
-from .gate import APPROVAL_TAMPERED, evaluate
+from .gate import APPROVAL_TAMPERED, BUDGET_PROBLEM, evaluate
 from .lock import LOCK_REL, LockError, drift, find_root, freeze, lock_hash, lock_path, read_lock
 from .receipts import list_receipts
 from .spec import SPEC_NAME, SpecError, load_spec
@@ -29,7 +29,8 @@ Freeze, approve and unfreeze with /necro inside Hermes; from a shell they refuse
   status            what is frozen here and the latest receipt; before a freeze, the tests it would lock
   freeze [command]  lock your tests by hash (type /necro freeze in the Hermes chat). With no necro.toml it
                     finds them and their command (pytest, unittest, npm test, go test, cargo test), writes
-                    necro.toml and locks it; put your own test command after freeze to use that instead
+                    necro.toml, locks the tests and the settings that shape the run, and runs them once;
+                    put your own test command after freeze to use that instead
   approve           accept a lock someone else froze and committed (type /necro approve in the chat)
   unfreeze          remove the lock so contracts can be edited (type /necro unfreeze in the chat)
   check             run every frozen contract now; write a receipt if all pass
@@ -148,12 +149,17 @@ def spec_root(cwd) -> Path | None:
 
 
 def _contract_lines(lk: dict) -> list:
+    """Each contract's id, words and command, and what it freezes: once, when every contract freezes the same files."""
     out = []
-    for c in lk["contracts"]:
-        files = ", ".join(f["path"] for f in c["files"])
+    lists = [", ".join(f["path"] for f in c["files"]) for c in lk["contracts"]]
+    shared = len(lists) > 1 and len(set(lists)) == 1
+    for c, files in zip(lk["contracts"], lists):
         out.append(f"  {c['id']:<6} {c.get('says') or '(no description)'}")
         out.append(f"         run: {c['run']}")
-        out.append(f"         frozen: {files}")
+        if not shared:
+            out.append(f"         frozen: {files}")
+    if shared:
+        out.append(f"  frozen, shared by all {len(lists)}: {lists[0]}")
     return out
 
 
@@ -232,42 +238,79 @@ def _no_tests(found, command: str | None) -> str:
             f"  - or write {SPEC_NAME} like this, then type /necro freeze:\n{example}")
 
 
-def _freeze_found(root: Path, approvals: Approvals, command: str | None) -> tuple:
+FREEZE_RUN_BUDGET = 25.0  # the run at freeze gets the gate's budget
+
+
+def right_now(root: Path, approvals: Approvals, cache=None, budget_s: float = FREEZE_RUN_BUDGET) -> str:
+    """One line on where the newly locked tests stand, from one run within the gate's budget."""
+    try:
+        v = evaluate(root, budget_s=budget_s, approved=approvals.mapping(), cache=cache, trigger="freeze")
+    except Exception:
+        return "Run /necro check to see where it stands."
+    if v.problems and v.problems[0] == BUDGET_PROBLEM or any(r.status in ("timeout", "unfinished", "skipped")
+                                                             for r in v.results):
+        return "Run /necro check to see where it stands."
+    if any(r.status == "error" for r in v.results):
+        return "Right now: the test command could not run. Run /necro check to see why."
+    if v.problems:
+        return f"Right now: the check does not pass: {v.problems[0]}."
+    counts = [detect.test_counts(r.output_tail) for r in v.results]
+    failing = total = None
+    if counts and all(counts):
+        failing, total = sum(c[0] for c in counts), sum(c[1] for c in counts)
+    if v.ok:
+        if total is None or total == 0:
+            return "Right now: they pass."
+        return "Right now: the test passes." if total == 1 else f"Right now: all {total} tests pass."
+    if failing and total:
+        if total == 1:
+            return "Right now: the test fails. Hermes can't say done until it passes."
+        return (f"Right now: {failing} of {total} tests {'fails' if failing == 1 else 'fail'}. Hermes can't say done "
+                "until they pass.")
+    return "Right now: the tests fail. Hermes can't say done until they pass."
+
+
+def _freeze_found(root: Path, approvals: Approvals, command: str | None, cache=None,
+                  run_budget_s: float = FREEZE_RUN_BUDGET) -> tuple:
     """/necro freeze where there is no necro.toml: find the tests and their command (or use the person's),
-    write necro.toml, freeze it. All or nothing: when it cannot lock, it changes nothing."""
+    write necro.toml, freeze it, run it once. All or nothing: when it cannot lock, it changes nothing."""
     if os.path.lexists(root / SPEC_NAME):
         return (f"Could not freeze: {root / SPEC_NAME} is a link, and Contract Necromancer never follows links. Put "
                 f"a regular {SPEC_NAME} there, or remove the link and type /necro freeze again."), 1
     found = detect.detect(root)
     if found.problem:
         return f"Nothing locked: {found.problem}. Open Hermes in your project's folder and type /necro freeze there.", 1
-    patterns = list(found.patterns)
     if command:
         try:
             run = detect.as_run(command)
         except ValueError as exc:
             return f"Nothing locked: `{command}` cannot be used as a test command ({exc}).", 1
-        patterns += [rel for rel in detect.named_files(root, command, found.listing) if rel not in found.files]
     else:
         run = found.run
-        if run is None and patterns:
-            what = detect.describe(patterns, len(found.files))
+        if run is None and found.patterns:
+            what = detect.describe(found.patterns, len(found.files))
             return (f"Nothing locked: found test files in {root}, {what}, but not the command that runs them. "
                     "Type /necro freeze <your test command>, for example /necro freeze make test, to lock them "
                     "with it."), 1
-    if not patterns:
+    if run is None:
+        return _no_tests(found, command), 1
+    shaped = detect.shape(root, run, found.listing)
+    if shaped.refusal:
+        return f"Nothing locked: {shaped.refusal}.", 1
+    patterns = list(found.patterns) + [f for f in shaped.files if f not in found.patterns and f not in found.files]
+    # Test-only config alone (pytest.ini, jest.config.*) is not a test to lock; a script or a Makefile the person's
+    # own command names is.
+    if not found.patterns and (not command or not [f for f in shaped.files if f not in detect.CONFIG_ONLY]):
         return _no_tests(found, command), 1
     problem = detect.runner_problem(run, root)
     if problem:
         if "import pytest" in problem:
-            venv = " /necro freeze .venv/bin/python -m pytest -q" if os.path.lexists(root / ".venv/bin/python") else \
-                " /necro freeze <your test command>"
-            fix = ("Start Hermes where pytest is installed (for example with your virtualenv active), or type"
-                   + venv + ".")
+            fix = ("Start Hermes where pytest is installed (for example with your virtualenv active), or type "
+                   "/necro freeze <your test command>.")
         else:
             fix = "Install it, or type /necro freeze <your test command>."
         return f"Nothing locked: found your tests, {detect.describe(patterns, len(found.files))}, but {problem}. {fix}", 1
-    text = detect.toml_text(run, patterns, found.outputs)
+    text = detect.toml_text(run, patterns, found.outputs, shaped.pins)
     path = root / SPEC_NAME
     try:
         if not detect.write_new(path, text):
@@ -281,18 +324,22 @@ def _freeze_found(root: Path, approvals: Approvals, command: str | None) -> tupl
         return f"Could not freeze: {exc}", 1
     approvals.approve(root, lock_hash(lk))
     count = len({f["path"] for c in lk["contracts"] for f in c["files"]})
-    reply = (f"Locked your tests: `{run}` must pass. Frozen: {detect.describe(patterns, count)}. Hermes can't say "
-             "\"done\" until this passes, and it can't edit these files. Undo: /necro unfreeze. Change what counts as "
-             "done: edit necro.toml, then /necro freeze. See where it stands: /necro check.")
+    also = detect.pins_phrase(shaped.pins)
+    reply = (f"Locked your tests: `{run}` must pass. Frozen: {detect.describe(patterns, count)}"
+             f"{', and ' + also if also else ''}. Hermes can't say \"done\" until this passes, and it can't edit these "
+             "files. Undo: /necro unfreeze. Change what counts as done: edit necro.toml, then /necro freeze.")
+    if shaped.unlockable:
+        reply += " Not locked: " + "; ".join(shaped.unlockable) + "."
     if approvals.store is None:
         reply += " Now type /necro approve in the Hermes chat, so Hermes accepts this lock."
-    return reply, 0
+    return reply + "\n" + right_now(root, approvals, cache, run_budget_s), 0
 
 
-def do_freeze(cwd, approvals: Approvals, command: str | None = None) -> tuple:
+def do_freeze(cwd, approvals: Approvals, command: str | None = None, cache=None,
+              run_budget_s: float = FREEZE_RUN_BUDGET) -> tuple:
     root = spec_root(cwd)
     if root is None:
-        return _freeze_found(Path(cwd).expanduser().resolve(), approvals, command)
+        return _freeze_found(Path(cwd).expanduser().resolve(), approvals, command, cache, run_budget_s)
     if not (root / SPEC_NAME).is_file():
         return (f"Could not freeze: {root} has a lock ({LOCK_REL}) but no {SPEC_NAME}. Put {SPEC_NAME} back (for "
                 "example from git), or type /necro unfreeze to start over."), 1
@@ -481,7 +528,7 @@ def in_agent_shell() -> bool:
 
 
 def dispatch(raw: str, cwd, approvals: Approvals, cache=None, from_shell: bool = False,
-             session_env_ok: bool = True) -> tuple:
+             session_env_ok: bool = True, run_budget_s: float = FREEZE_RUN_BUDGET) -> tuple:
     """Run one person-facing command. ``from_shell`` is True for `hermes necro` and `python3 necro`;
     their freeze, unfreeze and approve then refuse unless a person is clearly typing them. The /necro
     slash command (from_shell False) comes from the person's own chat input, which an agent cannot type."""
@@ -500,7 +547,7 @@ def dispatch(raw: str, cwd, approvals: Approvals, cache=None, from_shell: bool =
     if sub == "freeze":
         after = re.match(r"\s*freeze\b(.*)$", raw or "", re.IGNORECASE | re.DOTALL)
         command = (after.group(1) if after else shlex.join(rest)).strip()
-        return do_freeze(cwd, approvals, command or None)
+        return do_freeze(cwd, approvals, command or None, cache, run_budget_s)
     if sub == "unfreeze":
         return do_unfreeze(cwd, approvals)
     if sub == "approve":

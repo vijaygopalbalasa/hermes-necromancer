@@ -64,6 +64,7 @@ class Found:
     outputs: list = field(default_factory=list)
     problem: str | None = None     # why this folder was not looked at
     listing: list = field(default_factory=list)    # every file walked
+    shape: "Shape | None" = None   # what the found command depends on besides the test files
 
 
 def _read(root: Path, rel: str, limit: int) -> str | None:
@@ -229,6 +230,7 @@ def detect(root, budget_s: float = 60.0) -> Found:
     found.listing = files
     found.patterns, found.files = freeze_patterns(root, files)
     found.kind, found.run = _runner(root, files)
+    found.shape = shape(root, found.run, files) if found.run else None
     found.outputs = list(OUTPUTS.get(found.kind, []))
     if found.kind == "cargo" and not os.path.lexists(root / "Cargo.lock"):
         found.outputs = ["Cargo.lock"]  # cargo test writes it when it is missing
@@ -261,33 +263,241 @@ def as_run(command: str) -> str:
     return command
 
 
-def named_files(root: Path, command: str, listing: list) -> list:
-    """Files in the project that the command names, such as a test script: they define done too."""
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+# What shapes a run besides its test files. Test-only config files are frozen whole when they exist and pinned
+# as absent when they do not, so adding one later counts; settings inside a shared file are pinned by field.
+PYTEST_FILES = ("pytest.ini", ".pytest.ini", "pytest.toml", ".pytest.toml", "**/conftest.py")
+PYTEST_PINS = ("pyproject.toml#tool.pytest", "setup.cfg#[tool:pytest]", "tox.ini#[pytest]")
+NODE_FILES = ("jest.config.*", "vitest.config.*", ".mocharc*")
+NODE_PINS = ("package.json#jest", "package.json#mocha", "package.json#ava")
+CARGO_PINS = ("Cargo.toml#test", "Cargo.toml#package.autotests", "Cargo.toml#lib.test", "Cargo.toml#lib.harness",
+              "Cargo.toml#lib.doctest", "Cargo.toml#bin.*.test", "Cargo.toml#bin.*.harness")
+CONFIG_ONLY = set(PYTEST_FILES) | set(NODE_FILES)
+RUNNER_FILES = {
+    "make": ("GNUmakefile", "makefile", "Makefile"), "gmake": ("GNUmakefile", "makefile", "Makefile"),
+    "tox": ("tox.ini",), "nox": ("noxfile.py",), "just": ("justfile", "Justfile", ".justfile"),
+    "task": ("Taskfile.yml", "Taskfile.yaml", "taskfile.yml", "taskfile.yaml"),
+}
+SHELLS = {"sh", "bash", "zsh", "dash"}
+WRAPPERS = {"env", "exec", "command", "time", "nice", "nohup"}
+NODE_TOOLS = {"npx", "jest", "vitest", "mocha", "ava"}
+PACKAGE_MANAGERS = {"npm", "pnpm", "yarn", "bun"}
+YARN_BUILTINS = {"add", "install", "remove", "upgrade", "init", "info", "dlx", "exec", "workspace", "workspaces",
+                 "config", "cache", "global", "why", "link", "unlink", "pack", "publish", "set", "up", "node"}
+
+
+@dataclass
+class Shape:
+    """What a run depends on besides its test files."""
+    files: list = field(default_factory=list)       # frozen whole: test-only config, runner files, named files
+    pins: list = field(default_factory=list)        # settings pinned by field, or files that must stay absent
+    unlockable: list = field(default_factory=list)  # files the command names that cannot be locked, in plain words
+    refusal: str | None = None                      # why this command cannot be locked at all
+
+    def add(self, kind: str, item: str) -> None:
+        bucket = getattr(self, kind)
+        if item not in bucket:
+            bucket.append(item)
+
+
+def _words_of(text: str) -> list:
+    """The simple commands of a shell string, split at && || ; | & and parentheses; a redirection's target
+    is left out, since it is written, not run."""
+    lexer = shlex.shlex(text, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
     try:
-        words = list(lexer)
+        tokens = list(lexer)
     except ValueError:
         return []
-    have, out = set(listing), []
-    for word in words:
+    out, cur, skip = [], [], False
+    for token in tokens:
+        if token and set(token) <= SHELL_PUNCTUATION:
+            if "<" in token or ">" in token:
+                skip = True
+                continue
+            if cur:
+                out.append(cur)
+            cur = []
+        elif skip:
+            skip = False
+        else:
+            cur.append(token)
+    if cur:
+        out.append(cur)
+    return out
+
+
+def _simple(words: list) -> list:
+    """A simple command without leading VAR=x assignments and env/exec/time wrappers."""
+    i = 0
+    while i < len(words):
+        if ASSIGNMENT.match(words[i]):
+            i += 1
+        elif os.path.basename(words[i]) in WRAPPERS:
+            i += 1
+            while i < len(words) and (words[i].startswith("-") or ASSIGNMENT.match(words[i])):
+                i += 1
+        else:
+            break
+    return words[i:]
+
+
+def _rel(root: Path, word: str) -> str | None:
+    """A word as a path inside the project, or None."""
+    if not word or word.startswith(("$", "~")) or "\x00" in word:
+        return None
+    full = os.path.normpath(word if os.path.isabs(word) else os.path.join(root, word))
+    prefix = str(root).rstrip("/") + "/"
+    return full[len(prefix):] if full.startswith(prefix) else None
+
+
+def _hidden_in(rel: str) -> str | None:
+    """The folder necro never walks (.venv, node_modules and the like) that holds this path, if any."""
+    from .spec import SKIP_DIRS
+    return next((part for part in rel.split("/")[:-1] if part in SKIP_DIRS), None)
+
+
+def _freeze_or_pin(root: Path, item: str, have: set, sh: Shape) -> None:
+    """A test-only config file (or glob): frozen whole when it is there, else pinned, so adding it counts."""
+    rx = glob_regex(item) if GLOB_CHARS & set(item) else None
+    hits = [rel for rel in have if (rx.match(rel) if rx else rel == item)]
+    if hits and all(_freezable(root, rel) for rel in hits):
+        sh.add("files", item)
+    else:
+        sh.add("pins", item)
+
+
+def _script_names(prog: str, args: list) -> list:
+    """The package.json scripts a package-manager command runs."""
+    words = [a for a in args if not a.startswith("-")]
+    if not words:
+        return []
+    verb = words[0]
+    if verb in ("test", "t", "tst") and prog != "bun":
+        return ["test"]
+    if verb in ("run", "run-script", "rum", "urn"):
+        return words[1:2]
+    if prog in ("yarn", "pnpm") and verb not in YARN_BUILTINS:
+        return [verb]
+    return []
+
+
+def _script_pin(name: str) -> str:
+    return "package.json#scripts." + (json.dumps(name) if "." in name or '"' in name else name)
+
+
+def _one(root: Path, words: list, sh: Shape, have: set, top: bool, depth: int, seen: set) -> None:
+    """Lock what one simple command depends on."""
+    words = _simple(words)
+    if not words or depth > 6:
+        return
+    exe, args = words[0], words[1:]
+    prog = os.path.basename(exe)
+    if top and "/" in exe:
+        rel = _rel(root, exe)
+        hidden = _hidden_in(rel) if rel else None
+        if hidden:
+            rest = " ".join(args)
+            if prog.startswith("python") or prog in ("pytest", "py.test"):
+                instead = "python3 " + (rest if prog.startswith("python") else f"-m pytest {rest}".strip())
+            elif hidden == "node_modules":
+                instead = f"npx {prog} {rest}".strip()
+            else:
+                instead = "a program on your PATH"
+            sh.refusal = (f"that program ({exe}) lives in {hidden}, which is not locked; use {instead.strip()}, or "
+                          "lock it yourself in necro.toml")
+            return
+    if prog in SHELLS and len(args) >= 2 and args[0] == "-c":
+        for inner in _words_of(args[1]):
+            _one(root, inner, sh, have, top, depth + 1, seen)
+        return
+    if prog in PACKAGE_MANAGERS:
+        names = _script_names(prog, args)
+        if names:
+            _node(root, sh, have)
+            _scripts(root, names, sh, have, depth, seen)
+    if prog in NODE_TOOLS or (prog in ("pnpm", "yarn") and args[:1] in (["exec"], ["dlx"])):
+        _node(root, sh, have)
+    if prog in ("pytest", "py.test") or (prog.startswith("python") and args[:2] == ["-m", "pytest"]):
+        for item in PYTEST_FILES:
+            _freeze_or_pin(root, item, have, sh)
+        for pin in PYTEST_PINS:
+            sh.add("pins", pin)
+    if prog == "cargo" and args[:1] in (["test"], ["t"], ["nextest"]):
+        for pin in CARGO_PINS:
+            sh.add("pins", pin)
+    for name in RUNNER_FILES.get(prog, ()):
+        if name in have and _freezable(root, name):
+            sh.add("files", name)
+    for word in ([exe] if "/" in exe else []) + args:
         if word.startswith("-"):
             if "=" not in word:
                 continue
             word = word.split("=", 1)[1]
-        if not word:
+        rel = _rel(root, word)
+        if not rel or rel == "." or not os.path.lexists(root / rel) or os.path.isdir(root / rel) and not os.path.islink(root / rel):
             continue
-        p = Path(word)
-        if p.is_absolute():
-            try:
-                rel = p.relative_to(root).as_posix()
-            except ValueError:
-                continue
+        if os.path.islink(root / rel):
+            sh.add("unlockable", f"{rel} is a link, which Contract Necromancer never follows")
+        elif is_credential_path(root / rel):
+            sh.add("unlockable", f"{rel} is a credential file, which Contract Necromancer never opens")
+        elif rel not in have:
+            hidden = _hidden_in(rel)
+            if top and hidden:
+                sh.add("unlockable", f"{rel} is in {hidden}, which is never locked")
+        elif GLOB_CHARS & set(rel):
+            sh.add("unlockable", f"{rel} has a * ? or [ in its name, so it cannot be named in necro.toml")
         else:
-            rel = os.path.normpath(word).replace(os.sep, "/")
-        if rel in have and rel not in out and _freezable(root, rel) and not GLOB_CHARS & set(rel):
-            out.append(rel)
-    return out
+            sh.add("files", rel)
+
+
+def _node(root: Path, sh: Shape, have: set) -> None:
+    for item in NODE_FILES:
+        _freeze_or_pin(root, item, have, sh)
+    for pin in NODE_PINS:
+        sh.add("pins", pin)
+
+
+def _scripts(root: Path, names: list, sh: Shape, have: set, depth: int, seen: set) -> None:
+    """Pin each package.json script a command runs, with its pre and post scripts, and lock what it runs."""
+    text = _read(root, "package.json", MANIFEST_BYTES) if "package.json" in have else None
+    try:
+        scripts = (json.loads(text) or {}).get("scripts") if text else None
+    except (ValueError, AttributeError):
+        scripts = None
+    for name in names:
+        if name in seen or len(seen) > 40:
+            continue
+        seen.add(name)
+        for pin in (name, "pre" + name, "post" + name):
+            sh.add("pins", _script_pin(pin))
+        body = scripts.get(name) if isinstance(scripts, dict) else None
+        if isinstance(body, str):
+            for inner in _words_of(body):
+                _one(root, inner, sh, have, False, depth + 1, seen)
+
+
+def shape(root, run: str, listing: list) -> Shape:
+    """What ``run`` depends on besides the test files: see Shape. Reads package.json, by name, and nothing else."""
+    root = Path(root)
+    sh = Shape()
+    try:
+        argv = shlex.split(run)
+    except ValueError:
+        return sh
+    _one(root, argv, sh, set(listing), True, 0, set())
+    return sh
+
+
+def pins_phrase(pins: list) -> str:
+    """The pinned settings in plain words, for the reply."""
+    parts = []
+    if any(p.startswith("package.json#") for p in pins):
+        parts.append("the test settings in package.json")
+    if any(p in PYTEST_PINS or p in PYTEST_FILES for p in pins):
+        parts.append("pytest's settings")
+    if any(p.startswith("Cargo.toml#") for p in pins):
+        parts.append("the test settings in Cargo.toml")
+    return " and ".join(parts)
 
 
 def _imports(python: str, module: str, env: dict) -> bool:
@@ -323,7 +533,7 @@ def runner_problem(run: str, root) -> str | None:
     return None
 
 
-def toml_text(run: str, patterns: list, outputs=()) -> str:
+def toml_text(run: str, patterns: list, outputs=(), pins=()) -> str:
     """necro.toml for one contract, C1, with a plain header saying it was generated and can be edited.
     Strings are written as JSON strings, which TOML reads the same way."""
     q = lambda s: json.dumps(s, ensure_ascii=False)  # noqa: E731
@@ -331,15 +541,19 @@ def toml_text(run: str, patterns: list, outputs=()) -> str:
         "# Written by /necro freeze from the tests it found here. Edit it as you like: run is the command",
         "# that must pass, files are what Hermes cannot edit. Then type /necro freeze again to lock the new",
         "# version, or /necro unfreeze to remove the lock.",
-        "# Settings that choose which tests run (package.json, pyproject.toml, Cargo.toml) are not locked;",
-        "# add one to files to lock it too.",
-        "",
     ]
+    if pins:
+        lines += ["# pins lock the settings that shape the run (a test script, pytest's settings) by field: a change",
+                  "# to one counts as tampering, while other edits in the same file, such as dependencies, are fine."]
+    lines.append("")
     if outputs:
         lines += ["# Files a test run may write, such as coverage data; changes to them do not count.",
                   f"outputs = [{', '.join(q(o) for o in outputs)}]", ""]
     lines += ["[[contract]]", 'id = "C1"', 'says = "Your tests pass"', f"run = {q(run)}",
-              f"files = [{', '.join(q(p) for p in patterns)}]", ""]
+              f"files = [{', '.join(q(p) for p in patterns)}]"]
+    if pins:
+        lines.append(f"pins = [{', '.join(q(p) for p in pins)}]")
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -361,3 +575,49 @@ def remove_if_same(path: Path, text: str) -> None:
             path.unlink()
     except OSError:
         pass
+
+
+_PYTEST_SUMMARY = re.compile(r"^=*\s*((?:\d+ (?:failed|passed|errors?|skipped|xfailed|xpassed|deselected|warnings?)"
+                             r"(?:, )?)+) in [\d.]+s", re.MULTILINE)
+_PYTEST_PART = re.compile(r"(\d+) (failed|passed|errors?)")
+_UNITTEST_RAN = re.compile(r"^Ran (\d+) tests? in", re.MULTILINE)
+_UNITTEST_FAILED = re.compile(r"^FAILED \(([^)]*)\)", re.MULTILINE)
+_JEST = re.compile(r"^Tests:\s+(.*?)(\d+) total", re.MULTILINE)
+_VITEST = re.compile(r"^\s*Tests\s+(?:(\d+) failed\s*\|\s*)?(?:(\d+) passed)?.*?\((\d+)\)", re.MULTILINE)
+_NODE = re.compile(r"^# (tests|fail) (\d+)$", re.MULTILINE)
+_CARGO = re.compile(r"^test result: \w+\. (\d+) passed; (\d+) failed;", re.MULTILINE)
+
+
+def test_counts(output: str):
+    """(failing, total) from the end of a test run's output (pytest, unittest, jest, vitest, node --test or
+    cargo), or None when it cannot tell."""
+    text = output or ""
+    m = list(_PYTEST_SUMMARY.finditer(text))
+    if m:
+        parts = {kind.rstrip("s") if kind.startswith("error") else kind: int(n)
+                 for n, kind in _PYTEST_PART.findall(m[-1].group(1))}
+        failing = parts.get("failed", 0) + parts.get("error", 0)
+        return failing, failing + parts.get("passed", 0)
+    ran = _UNITTEST_RAN.findall(text)
+    if ran:
+        total = int(ran[-1])
+        failed = _UNITTEST_FAILED.findall(text)
+        failing = sum(int(n) for kind, n in re.findall(r"(failures|errors)=(\d+)", failed[-1])) if failed else 0
+        return failing, total
+    jest = _JEST.findall(text)
+    if jest:
+        head, total = jest[-1]
+        failed = re.search(r"(\d+) failed", head)
+        return (int(failed.group(1)) if failed else 0), int(total)
+    vitest = _VITEST.findall(text)
+    if vitest:
+        failed, _passed, total = vitest[-1]
+        return int(failed or 0), int(total)
+    node = dict(_NODE.findall(text))
+    if "tests" in node:
+        return int(node.get("fail", 0)), int(node["tests"])
+    cargo = _CARGO.findall(text)
+    if cargo:
+        passed, failed = sum(int(p) for p, _ in cargo), sum(int(f) for _, f in cargo)
+        return failed, passed + failed
+    return None

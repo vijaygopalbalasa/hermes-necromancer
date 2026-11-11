@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .canon import canonical_json, hash_file, sha256_text, utc_now, write_json_atomic
+from .pins import PinError, changed_message, observe, pinned_file, value_hash
 from .spec import SPEC_NAME, SpecError, expand, load_spec, walk_files
 
 LOCK_REL = ".necro/lock.json"
@@ -33,7 +34,7 @@ def build_lock(root, now: str | None = None, files=None) -> dict:
     contracts = []
     for c in sp.contracts:
         frozen = expand(root, c.files, strict=True, where=f"contract {c.id}", files=files)
-        contracts.append({
+        entry = {
             "id": c.id,
             "says": c.says,
             "run": c.run,
@@ -41,7 +42,13 @@ def build_lock(root, now: str | None = None, files=None) -> dict:
             "env": list(c.env),
             "patterns": list(c.files),
             "files": [{"path": f, "sha256": hash_file(root / f)} for f in frozen],
-        })
+        }
+        if c.pins:  # only when present, so a lock without pins hashes as it always did
+            try:
+                entry["pins"] = [{"pin": p, "sha256": value_hash(root, p, files)} for p in c.pins]
+            except PinError as exc:
+                raise SpecError(f"contract {c.id}: {exc}") from None
+        contracts.append(entry)
     lk = {
         "kind": LOCK_KIND,
         "version": 1,
@@ -92,6 +99,10 @@ def read_lock(root) -> dict | None:
             raise LockError(f"{LOCK_REL} has a bad timeout in contract {c['id']}")
         if not isinstance(c.get("env", []), list) or not isinstance(c.get("patterns", []), list):
             raise LockError(f"{LOCK_REL} has a malformed contract {c['id']}")
+        pins = c.get("pins", [])
+        if not isinstance(pins, list) or not all(isinstance(p, dict) and isinstance(p.get("pin"), str)
+                                                 and isinstance(p.get("sha256"), str) for p in pins):
+            raise LockError(f"{LOCK_REL} has malformed pins in contract {c['id']}")
     if not isinstance(lk.get("spec"), dict):
         raise LockError(f"{LOCK_REL} does not pin {SPEC_NAME}")
     return lk
@@ -136,14 +147,17 @@ def frozen_patterns(lk: dict) -> list:
 class Drift:
     spec: list = field(default_factory=list)
     contracts: dict = field(default_factory=dict)
+    pinned: dict = field(default_factory=dict)  # a pin's reason -> the files it names
 
     def any(self) -> bool:
         return bool(self.spec or self.contracts)
 
     def paths(self) -> list:
-        out = []
+        out = [f for files in self.pinned.values() for f in files]
         for reasons in [self.spec, *self.contracts.values()]:
             for r in reasons:
+                if r in self.pinned:
+                    continue
                 if ": " in r:
                     out.append(r.split(": ", 1)[1])
                 elif r.endswith(" changed since freeze"):
@@ -185,6 +199,20 @@ def drift(root, lk: dict, files=None, deadline=None) -> Drift:
         for rel in matched:
             if rel not in pinned:
                 reasons.append(f"added after freeze: {rel}")
+        for entry in c.get("pins") or []:
+            text, stored = entry.get("pin", ""), entry.get("sha256")
+            try:
+                now = observe(root, text, files)
+            except PinError as exc:
+                reason = f"{exc}, so the settings it pins cannot be checked"
+                d.pinned[reason] = [pinned_file(text)]
+                reasons.append(reason)
+                continue
+            if sha256_text(canonical_json(now)) != stored:
+                reason = changed_message(text, stored, now)
+                named = [e[0] for e in now[1]] if now[:1] == ["files"] else [pinned_file(text)]
+                d.pinned[reason] = named or [pinned_file(text)]
+                reasons.append(reason)
         if reasons:
             d.contracts[c["id"]] = reasons
     return d

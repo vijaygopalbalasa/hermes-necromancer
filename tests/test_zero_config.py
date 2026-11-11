@@ -101,6 +101,11 @@ def no_runner_problem(*args, **kwargs):
     return None
 
 
+def not_run(*args, **kwargs):
+    """Stands in for the run at freeze where the runner (npm, go, cargo, pytest) may not be installed."""
+    return "Right now: (not run in this test)."
+
+
 class Detection(unittest.TestCase):
     def found(self, files):
         with Folder(files) as f:
@@ -219,10 +224,12 @@ class Detection(unittest.TestCase):
             got = detect.detect(f.dir)
             self.assertEqual(got.patterns, ["tests/helper.js", "src/a.test.js", "src/b.test.js"])
             self.assertNotIn(".env.test.local", got.files)
-            with mock.patch.object(detect, "runner_problem", no_runner_problem):
+            with mock.patch.object(detect, "runner_problem", no_runner_problem), \
+                    mock.patch.object(commands, "right_now", not_run):
                 text, code = run(f, "freeze")
             self.assertEqual(code, 0, text)  # strict freezing accepts what detection chose
-            self.assertIn("Frozen: tests/helper.js, src/a.test.js, src/b.test.js (3 files).", text)
+            self.assertIn("Frozen: tests/helper.js, src/a.test.js, src/b.test.js (3 files), and the test settings in "
+                          "package.json.", text)
 
     def test_the_home_folder_is_not_a_project(self):
         with Folder({"tests/test_calc.py": UNITTEST_TEST}) as f:
@@ -265,7 +272,8 @@ class FreezeWithoutNecroToml(unittest.TestCase):
             self.assertEqual(text, "Locked your tests: `python3 -m unittest discover -q -s tests` must pass. Frozen: "
                                    "tests/** (1 file). Hermes can't say \"done\" until this passes, and it can't edit "
                                    "these files. Undo: /necro unfreeze. Change what counts as done: edit necro.toml, "
-                                   "then /necro freeze. See where it stands: /necro check.")
+                                   "then /necro freeze.\nRight now: the test fails. Hermes can't say done until it "
+                                   "passes.")
             spec_text = f.read("necro.toml")
             self.assertTrue(spec_text.startswith("# Written by /necro freeze"), spec_text)
             lk = lock.read_lock(f.dir)
@@ -298,28 +306,31 @@ class FreezeWithoutNecroToml(unittest.TestCase):
 
     def test_pytest_project(self):
         with Folder({"calc.py": CALC_BUGGY, "tests/test_calc.py": PYTEST_BARE_TEST, "tests/conftest.py": ""}) as f:
-            with mock.patch.object(detect, "runner_problem", no_runner_problem):
+            with mock.patch.object(detect, "runner_problem", no_runner_problem), \
+                    mock.patch.object(commands, "right_now", not_run):
                 text, code = run(f, "freeze")
             self.assertEqual(code, 0, text)
-            self.assertTrue(text.startswith("Locked your tests: `python3 -m pytest -q` must pass. Frozen: tests/** "
-                                            "(2 files)."), text)
+            self.assertTrue(text.startswith("Locked your tests: `python3 -m pytest -q` must pass. Frozen: tests/**, "
+                                            "**/conftest.py (2 files), and pytest's settings."), text)
             self.assertEqual(tomllib.loads(f.read("necro.toml"))["contract"][0]["run"], "python3 -m pytest -q")
 
     def test_node_project(self):
         with Folder({"package.json": json.dumps({"scripts": {"test": "jest"}}), "src/sum.js": "",
                      "src/sum.test.js": "test('adds', () => {})\n"}) as f:
-            with mock.patch.object(detect, "runner_problem", no_runner_problem):
+            with mock.patch.object(detect, "runner_problem", no_runner_problem), \
+                    mock.patch.object(commands, "right_now", not_run):
                 text, code = run(f, "freeze")
             self.assertEqual(code, 0, text)
             self.assertTrue(text.startswith("Locked your tests: `npm test --silent` must pass. Frozen: **/*.test.* "
-                                            "(1 file)."), text)
+                                            "(1 file), and the test settings in package.json."), text)
 
     def test_go_and_rust_projects(self):
         cases = (({"go.mod": "module x\n", "x_test.go": "package x\n"}, "go test ./..."),
                  ({"Cargo.toml": '[package]\nname = "x"\n', "tests/it.rs": ""}, "cargo test --quiet"))
         for files, want in cases:
             with self.subTest(run=want), Folder(files) as f:
-                with mock.patch.object(detect, "runner_problem", no_runner_problem):
+                with mock.patch.object(detect, "runner_problem", no_runner_problem), \
+                        mock.patch.object(commands, "right_now", not_run):
                     text, code = run(f, "freeze")
                 self.assertEqual(code, 0, text)
                 self.assertEqual(lock.read_lock(f.dir)["contracts"][0]["run"], want)
@@ -360,7 +371,8 @@ class FreezeWithoutNecroToml(unittest.TestCase):
                 text, code = run(f, "freeze")
             self.assertNotEqual(code, 0)
             self.assertIn("cannot import pytest", text)
-            self.assertIn("/necro freeze .venv/bin/python -m pytest -q", text)
+            self.assertNotIn(".venv", text)  # a program in .venv is never locked, so it is never suggested
+            self.assertIn("/necro freeze <your test command>", text)
             self.assertEqual(f.state(), before)
 
     def test_a_failed_freeze_leaves_no_necro_toml_behind(self):

@@ -52,6 +52,7 @@ class NecroPlugin:
         self.ctx = ctx
         self.cache: dict = {}
         self.turns: dict = {}   # session id -> project folders the gate checked this turn
+        self.sent_back: dict = {}  # session id -> this turn's refusals (failing contract ids), for the stamp
         self.seen: dict = {}    # project folder -> digest at its last check
         self.session_env_ok = False  # set by register() when the agent-shell marker could be registered
         self._mutex = threading.Lock()
@@ -150,6 +151,7 @@ class NecroPlugin:
         through the shell, even in this first turn, is noticed when the reply is stamped."""
         if session_id:
             self.turns.pop(session_id, None)
+            self.sent_back.pop(session_id, None)
         try:
             root = lock.find_root(self.cwd())
             if root is not None and str(root) not in self.seen:
@@ -167,6 +169,7 @@ class NecroPlugin:
         try:
             orphans = self._orphans(changed_paths)
             if orphans:
+                self._sent(session_id, [])
                 return {"action": "continue", "message": f"[Contract Necromancer] You cannot finish yet: "
                         f"{self._orphan_problem(orphans)}."}
             roots = self._roots(changed_paths)
@@ -178,11 +181,13 @@ class NecroPlugin:
                 if not v.ok:
                     logger.info("contract-necromancer: refused done in %s (attempt %s): %s", root, attempt,
                                 v.failing_ids() or v.problems)
+                    self._sent(session_id, v.failing_ids())
                     return {"action": "continue", "message": gate.continue_message(v)}
                 logger.info("contract-necromancer: %s passes, receipt %s", root, v.receipt_hash)
             return None
         except Exception as exc:  # a broken gate must not let a frozen project slip through silently
             logger.exception("contract-necromancer: pre_verify failed")
+            self._sent(session_id, [])
             return {"action": "continue", "message": f"[Contract Necromancer] The frozen contracts could not be "
                     f"checked ({type(exc).__name__}: {exc}). Run necro_check, fix what it reports, then finish."}
 
@@ -194,11 +199,14 @@ class NecroPlugin:
         the reply claims the work is done."""
         deadline = self._deadline("gate_budget_seconds", GATE_BUDGET_S)
         checked = self.turns.pop(session_id, []) if session_id else []
+        refusals = self.sent_back.pop(session_id, []) if session_id else []
+        line = gate.sent_back_line(refusals)
+        lead = f"{line} " if line else ""
         roots = []
         try:
             orphans = self._orphans()
             if orphans:
-                return (f"Not done. Contract Necromancer: {self._orphan_problem(orphans)}. "
+                return (f"Not done. {lead}Contract Necromancer: {self._orphan_problem(orphans)}. "
                         f"No receipt was written.\n\n{response_text}")
             roots = [Path(r) for r in checked if (Path(r) / lock.LOCK_REL).is_file()]
             for root in self._roots(include_cwd=True):
@@ -213,11 +221,11 @@ class NecroPlugin:
             if not verdicts:
                 return None
             failing = [v for v in verdicts if not v.ok]
-            return gate.stamp(failing[0] if failing else verdicts[0], response_text)
+            return gate.stamp(failing[0] if failing else verdicts[0], response_text, refusals)
         except Exception as exc:
             logger.exception("contract-necromancer: transform_llm_output failed")
             if roots or checked:
-                return (f"Not done. Contract Necromancer could not check the frozen contracts "
+                return (f"Not done. {lead}Contract Necromancer could not check the frozen contracts "
                         f"({type(exc).__name__}). No receipt was written.\n\n{response_text}")
             return None
 
@@ -245,6 +253,14 @@ class NecroPlugin:
             logger.exception("contract-necromancer: pre_tool_call failed")
             return None
         return {"action": "block", "message": msg} if msg else None
+
+    def _sent(self, session_id, ids) -> None:
+        """Record one refusal this turn, so the final reply can say Hermes was sent back."""
+        if not session_id:
+            return
+        self.sent_back.setdefault(session_id, []).append(list(ids))
+        while len(self.sent_back) > MAX_TURNS_TRACKED:
+            self.sent_back.pop(next(iter(self.sent_back)))
 
     def _remember(self, session_id, roots) -> None:
         if not session_id:
@@ -290,7 +306,8 @@ class NecroPlugin:
 
     # ---- person-facing commands -------------------------------------------------------------
     def slash(self, raw_args="", **kwargs) -> str:
-        text, _code = commands.dispatch(raw_args or "", self.cwd(), self.approvals, self.cache)
+        text, _code = commands.dispatch(raw_args or "", self.cwd(), self.approvals, self.cache,
+                                        run_budget_s=self.setting("gate_budget_seconds", GATE_BUDGET_S))
         return text
 
     def cli_setup(self, parser) -> None:
