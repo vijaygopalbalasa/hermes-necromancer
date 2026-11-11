@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .canon import canonical_json, file_pin, is_credential_path, sha256_text, utc_now, write_json_atomic
 from .lock import frozen_paths, lock_hash
-from .runner import all_pass
+from .runner import all_pass, contract_env
 from .spec import expand, matches, skipped, walk_files
 
 RECEIPTS_REL = ".necro/receipts"
@@ -28,7 +28,9 @@ _GIT_SAFE = ["-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "-
 
 
 def _git(root: Path, *args) -> str | None:
-    env = {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")}
+    # The contracts' small environment (no provider keys, no GIT_DIR from outside), and git never takes an
+    # optional lock or waits on a password prompt.
+    env = contract_env()
     env.update({"GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0"})
     try:
         out = subprocess.run(["git", *_GIT_SAFE, "-C", str(root), *args], capture_output=True, timeout=30,

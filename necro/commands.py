@@ -18,6 +18,7 @@ from .canon import utc_now
 from .gate import APPROVAL_TAMPERED, BUDGET_PROBLEM, evaluate
 from .lock import LOCK_REL, LockError, drift, find_root, freeze, lock_hash, lock_path, read_lock
 from .receipts import list_receipts
+from .runner import contract_env
 from .spec import SPEC_NAME, SpecError, load_spec
 from .verify import verify_receipt
 
@@ -468,7 +469,7 @@ def hermes_ancestors(limit: int = 40, run=None):
             return chain
         try:
             out = run(["ps", "-o", "ppid=", "-o", "command=", "-p", str(pid)], capture_output=True, text=True,
-                      timeout=5, stdin=subprocess.DEVNULL)
+                      timeout=5, stdin=subprocess.DEVNULL, env=contract_env())
         except (OSError, subprocess.SubprocessError):
             return None
         parts = (out.stdout or "").strip().split(None, 1)

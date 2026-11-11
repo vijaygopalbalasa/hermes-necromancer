@@ -135,6 +135,7 @@ def run_demo(keep: bool = True) -> str:
     say("Contract Necromancer demo: a scripted agent, the plugin's real hooks, a throwaway project.")
     say(f"Project: {project} (a tip splitter whose split_bill loses the leftover cents)\n")
 
+    from .runner import contract_env
     from .spec import load_spec
     say(f"1. A person reads necro.toml and freezes its {len(load_spec(project).contracts)} contracts.")
     say("   > /necro freeze")
@@ -154,7 +155,7 @@ def run_demo(keep: bool = True) -> str:
     decision = ctx.hooks["pre_tool_call"](tool_name="terminal", args=shell, task_id="demo", session_id="demo-2")
     say("   The guard " + ("blocked it." if decision else "did not catch it, so the edit lands."))
     if not decision:
-        subprocess.run([sys.executable, "-c", SNEAKY], cwd=project, check=True)
+        subprocess.run([sys.executable, "-c", SNEAKY], cwd=project, check=True, env=contract_env())
     gate("Done. The fairness check passes now.", "demo-2")
     shutil.copy2(TEMPLATE / "contracts" / "test_fair.py", project / "contracts" / "test_fair.py")
     say("   (the person restores the contract file)")

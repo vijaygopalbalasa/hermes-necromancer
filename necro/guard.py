@@ -19,7 +19,8 @@ from .spec import GLOB_CHARS, matches
 
 FILE_TOOLS = {"write_file", "patch"}
 V4A_FILE = re.compile(r"^\*\*\*\s*(?:Update|Add|Delete)\s+File:\s*(.+)$", re.MULTILINE)
-V4A_MOVE = re.compile(r"^\*\*\*\s*Move\s+File:\s*(.+?)\s*->\s*(.+)$", re.MULTILINE)
+# The rest of a move line; split at its first "->" in Python, so a long line cannot make the regex backtrack.
+V4A_MOVE = re.compile(r"^\*\*\*\s*Move\s+File:(.*)$", re.MULTILINE)
 PERSON_ONLY = {"freeze", "unfreeze", "approve"}
 SEGMENT_SPLIT = re.compile(r"\|\||&&|[;|&\n]")
 REDIRECT = re.compile(r"(?<![<>&0-9])(?:\d|&)?>>?\|?\s*([^\s;|&<>]+)")
@@ -31,10 +32,15 @@ WRITE_COMMANDS = {
 # smuggled past the agent-shell marker, so it is refused outright.
 EVASION = re.compile(
     r"\benv\s+(?:-[a-z]*[iu]\b|--ignore-environment|--unset)|\bunset\b|\bsetsid\b|\bnohup\b|\bdisown\b|"
-    r"\(\s*[^()]*&\s*\)|\bdaemon(?:ize)?\b|\bstart-stop-daemon\b|\bsystemd-run\b|\blaunchctl\b|\bat\s+now\b")
+    r"\bdaemon(?:ize)?\b|\bstart-stop-daemon\b|\bsystemd-run\b|\blaunchctl\b|\bat\s+now\b")
+# A subshell sent to the background, ( ... & ): "(" up to the next paren, with the "&" checked in Python, so a
+# long or unclosed one cannot make the regex backtrack.
+SUBSHELL = re.compile(r"\(([^()]*)\)")
 LAST_ARG_COMMANDS = {"cp", "install", "rsync", "scp"}
 GIT_WRITES = {"rm", "mv"}
-MAX_TEXT = 500_000
+# Longer shell commands and code are not split into words (that is slow on one huge token); inside a frozen
+# project, or when they name necro or a frozen file, they are refused with TOO_LONG_BLOCK instead.
+MAX_TEXT = 100_000
 
 _LOCK_CACHE: dict = {}
 
@@ -181,7 +187,9 @@ def file_targets(tool_name: str, args: dict) -> list:
             return []
         paths = [m.group(1).strip() for m in V4A_FILE.finditer(body)]
         for m in V4A_MOVE.finditer(body):
-            paths += [m.group(1).strip(), m.group(2).strip()]
+            src, arrow, dst = m.group(1).partition("->")
+            if arrow:
+                paths += [src.strip(), dst.strip()]
         return [p for p in paths if p]
     p = args.get("path")
     return [str(p)] if p else []
@@ -305,6 +313,10 @@ def _bare(token: str) -> str:
             return token
 
 
+def _evasion(text: str) -> bool:
+    return bool(EVASION.search(text)) or any(m.group(1).rstrip().endswith("&") for m in SUBSHELL.finditer(text))
+
+
 def _code_writes(low_text: str, spellings: set) -> bool:
     """True when code (Python or JavaScript) writes, deletes or moves one of these exact paths."""
     for s in spellings:
@@ -313,8 +325,8 @@ def _code_writes(low_text: str, spellings: set) -> bool:
             r"open\(\s*" + q + r"\s*,\s*(?:mode\s*=\s*)?['\"][^'\"]*[wax+]",
             r"path\(\s*" + q + r"\s*\)\s*\.\s*(?:write_text|write_bytes|unlink|rename|replace|touch|chmod|open\(\s*['\"][^'\"]*[wax+])",
             r"os\.(?:remove|unlink|rename|replace|truncate|chmod)\(\s*" + q,
-            r"(?:os\.(?:rename|replace)|shutil\.\w+)\([^)]*" + q,
-            r"fs(?:\.promises)?\.\w*(?:write|unlink|rm|rename|truncate|append|copy)\w*\(\s*" + q,
+            r"(?:os\.(?:rename|replace)|shutil\.\w+)\([^()]*" + q,
+            r"fs(?:\.promises)?\.\w{0,64}?(?:write|unlink|rm|rename|truncate|append|copy)\w{0,64}\(\s*" + q,
         )
         if any(re.search(p, low_text) for p in patterns):
             return True
@@ -338,7 +350,7 @@ def _shell_block(cmd: str, wd: str, store_dir: str | None, frozen_roots=()) -> s
     joined = " ".join(words).lower()
     if _person_only(words) or _person_only_text(joined) or "necro_agent_session" in joined:
         return PERSON_BLOCK
-    if ("necro" in low or "necro" in joined) and (EVASION.search(low) or EVASION.search(joined)):
+    if ("necro" in low or "necro" in joined) and (_evasion(low) or _evasion(joined)):
         return EVASION_BLOCK
     if _touches_store(low + "\n" + joined, words, wd, store_dir):
         return STORE_BLOCK
