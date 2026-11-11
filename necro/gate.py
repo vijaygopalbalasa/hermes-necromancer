@@ -195,8 +195,12 @@ def evaluate(root, *, budget_s: float | None = None, deadline: float | None = No
         ignored = git_ignored(root, sources)
         pins = [pin_entry(p, after.get(p), p in ignored) for p in sources]
         receipt = build_receipt(root, lk, results, trigger=trigger, pins=pins)
-        v.receipt_path = write_receipt(root, receipt)
-        v.receipt_hash = receipt["receiptHash"]
+        try:
+            v.receipt_path = write_receipt(root, receipt)
+            v.receipt_hash = receipt["receiptHash"]
+        except OSError as exc:  # a link where the receipts go, say: no receipt, so not done
+            v.ok = False
+            v.problems.append(f"the receipt could not be written ({exc})")
     return v
 
 

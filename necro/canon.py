@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import stat
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -108,9 +109,43 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
-def write_json_atomic(path: Path, value) -> None:
-    """Write pretty JSON next to the target, then rename it into place."""
+class LinkRefused(OSError):
+    """A write would go through a link (a planted one, say), so nothing was written."""
+
+
+def _refuse_links(path: Path) -> None:
+    """Refuse a target, its folder or a .necro folder above it that is a link."""
+    checks = [path, path.parent] + [p for p in path.parents if p.name == ".necro"]
+    for candidate in checks:
+        if os.path.islink(candidate):
+            raise LinkRefused(f"{candidate} is a link, and Contract Necromancer never writes through a link. Remove it "
+                              "and try again")
+
+
+def write_text_atomic(path, text: str) -> None:
+    """Write text beside the target in a new file with a random name (mkstemp: O_EXCL, so a planted link at a
+    predictable name never catches the write), fsync it, then rename it into place. Refuses when the target, its
+    folder or the .necro folder is a link; on any error the temporary file is removed."""
+    path = Path(path)
+    _refuse_links(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    _refuse_links(path)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            os.fchmod(handle.fileno(), 0o644)
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)  # replaces a link at the target itself, never its target
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def write_json_atomic(path: Path, value) -> None:
+    """Write pretty JSON safely (see write_text_atomic)."""
+    write_text_atomic(path, json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n")

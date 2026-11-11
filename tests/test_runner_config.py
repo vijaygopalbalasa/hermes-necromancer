@@ -339,5 +339,78 @@ class MoreRunnerFiles(unittest.TestCase):
                 self.assertIn(want, pins)
 
 
+
+class NoWriteThroughALink(unittest.TestCase):
+    """Security review, Nov 11: a link the agent planted at a write site never catches the person's write."""
+
+    def outside(self):
+        import tempfile
+        d = tempfile.mkdtemp(prefix="necro-outside-")
+        target = os.path.join(d, "bashrc")
+        with open(target, "w") as fh:
+            fh.write("untouched\n")
+        return d, target
+
+    def test_the_lock_is_not_written_through_a_planted_temp_link(self):
+        d, target = self.outside()
+        with Folder({"calc.py": CALC_FIXED, "tests/test_calc.py": UNITTEST_TEST}) as f:
+            os.makedirs(f.path(".necro"))
+            os.symlink(target, f.path(".necro/.lock.json.tmp"))
+            text, code = run(f, "freeze")
+            self.assertEqual(code, 0, text)
+            self.assertIsNotNone(lock.read_lock(f.dir))
+        with open(target) as fh:
+            self.assertEqual(fh.read(), "untouched\n")
+
+    def test_a_sources_only_necro_toml_is_not_written_through_a_planted_temp_link(self):
+        d, target = self.outside()
+        with Folder({"calc.py": CALC_FIXED, "tests/test_calc.py": UNITTEST_TEST, "necro.toml": 'sources = ["tests/**"]\n'}) as f:
+            os.symlink(target, f.path(".necro.toml.tmp"))
+            text, code = run(f, "freeze")
+            self.assertEqual(code, 0, text)
+            self.assertIn("[[contract]]", f.read("necro.toml"))
+        with open(target) as fh:
+            self.assertEqual(fh.read(), "untouched\n")
+
+    def test_a_linked_necro_folder_or_necro_toml_is_refused(self):
+        d, target = self.outside()
+        with Folder({"calc.py": CALC_FIXED, "tests/test_calc.py": UNITTEST_TEST}) as f:
+            os.symlink(d, f.path(".necro"))
+            text, code = run(f, "freeze")
+            self.assertNotEqual(code, 0)
+            self.assertIn("is a link", text)
+            self.assertEqual(sorted(os.listdir(d)), ["bashrc"])
+        with Folder({"calc.py": CALC_FIXED, "tests/test_calc.py": UNITTEST_TEST}) as f:
+            os.symlink(target, f.path("necro.toml"))
+            text, code = run(f, "freeze")
+            self.assertNotEqual(code, 0)
+        with open(target) as fh:
+            self.assertEqual(fh.read(), "untouched\n")
+
+    def test_a_linked_receipts_folder_means_no_receipt_and_not_done(self):
+        d, target = self.outside()
+        with Folder({"calc.py": CALC_FIXED, "tests/test_calc.py": UNITTEST_TEST}) as f:
+            approvals = commands.Approvals(FakeState())
+            with mock.patch.object(commands, "right_now", not_run):
+                run(f, "freeze", approvals)
+            os.symlink(d, f.path(".necro/receipts"))
+            v = gate.evaluate(f.dir, budget_s=60, approved=approvals.mapping())
+            self.assertFalse(v.ok)
+            self.assertTrue(any("receipt could not be written" in p for p in v.problems), v.problems)
+            self.assertEqual(sorted(os.listdir(d)), ["bashrc"])
+
+    def test_the_approval_key_is_never_read_or_written_through_a_link(self):
+        d, target = self.outside()
+        state = FakeState()
+        key = state.path.parent / commands.Approvals.KEY_FILE
+        os.symlink(target, key)
+        with Folder({"calc.py": CALC_FIXED, "tests/test_calc.py": UNITTEST_TEST}) as f:
+            text, code = run(f, "freeze", commands.Approvals(state))
+            self.assertNotEqual(code, 0)
+            self.assertIn("link", text)
+        with open(target) as fh:
+            self.assertEqual(fh.read(), "untouched\n")
+
+
 if __name__ == "__main__":
     unittest.main()

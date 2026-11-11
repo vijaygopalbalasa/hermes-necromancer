@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 from . import detect
-from .canon import utc_now
+from .canon import utc_now, write_text_atomic
 from .gate import APPROVAL_TAMPERED, BUDGET_PROBLEM, evaluate
 from .lock import LOCK_REL, LockError, drift, find_root, freeze, lock_hash, lock_path, read_lock
 from .receipts import list_receipts
@@ -80,6 +80,10 @@ class Approvals:
                 os.rename(old, self.key_path)
             except OSError:
                 pass
+        if os.path.islink(self.key_path):  # never read through a link: the records then fail their check
+            if create:
+                raise OSError(f"{self.key_path} is a link, and Contract Necromancer never reads or writes through one")
+            return None
         try:
             return bytes.fromhex(self.key_path.read_text().strip())
         except (OSError, ValueError):
@@ -387,11 +391,9 @@ def _freeze_found(root: Path, approvals: Approvals, command: str | None, cache=N
         text = before.rstrip("\n") + "\n\n" + detect.toml_text(run, patterns, () if has_outputs else found.outputs,
                                                                 shaped.pins)
         try:
-            tmp = path.with_name(f".{SPEC_NAME}.tmp")
-            tmp.write_text(text, encoding="utf-8")
-            os.replace(tmp, path)
+            write_text_atomic(path, text)
         except OSError as exc:
-            return f"Nothing locked: could not write {path} ({exc.strerror or exc}).", 1
+            return f"Nothing locked: could not write {SPEC_NAME} ({exc.strerror or exc}).", 1
     else:
         text = detect.toml_text(run, patterns, found.outputs, shaped.pins)
         try:
@@ -403,11 +405,17 @@ def _freeze_found(root: Path, approvals: Approvals, command: str | None, cache=N
         lk = freeze(root)
     except (SpecError, OSError) as exc:
         if partial:
-            path.write_text(partial[0], encoding="utf-8")
+            try:
+                write_text_atomic(path, partial[0])
+            except OSError:
+                pass
         else:
             detect.remove_if_same(path, text)
         return f"Could not freeze: {exc}", 1
-    approvals.approve(root, lock_hash(lk))
+    try:
+        approvals.approve(root, lock_hash(lk))
+    except OSError as exc:
+        return f"Could not freeze: {exc}", 1
     count = len({f["path"] for c in lk["contracts"] for f in c["files"]})
     also = detect.pins_phrase(shaped.pins)
     reply = (f"Locked your tests: `{run}` must pass. Locked files: {detect.describe(patterns, count)}"
@@ -425,6 +433,12 @@ def _freeze_found(root: Path, approvals: Approvals, command: str | None, cache=N
 
 def do_freeze(cwd, approvals: Approvals, command: str | None = None, cache=None,
               run_budget_s: float = FREEZE_RUN_BUDGET) -> tuple:
+    here = Path(cwd).expanduser().resolve()
+    for d in {here, spec_root(cwd) or here}:
+        for name in (".necro", SPEC_NAME):
+            if os.path.islink(d / name):
+                return (f"Could not freeze: {name} in {d.name} is a link, and Contract Necromancer never writes "
+                        "through a link. Remove it and type /necro freeze again."), 1
     root = spec_root(cwd)
     if root is None:
         return _freeze_found(Path(cwd).expanduser().resolve(), approvals, command, cache, run_budget_s)
@@ -439,10 +453,13 @@ def do_freeze(cwd, approvals: Approvals, command: str | None = None, cache=None,
         return _freeze_found(root, approvals, None, cache, run_budget_s, partial)
     try:
         lk = freeze(root)
-    except SpecError as exc:
+    except (SpecError, OSError) as exc:
         return f"Could not freeze: {exc}", 1
     digest = lock_hash(lk)
-    approvals.approve(root, digest)
+    try:
+        approvals.approve(root, digest)
+    except OSError as exc:
+        return f"Could not freeze: {exc}", 1
     files = len({f["path"] for c in lk["contracts"] for f in c["files"]})
     n = len(lk["contracts"])
     lines = [f"Froze {n} contract{'' if n == 1 else 's'} ({files} file{'' if files == 1 else 's'}) in {root}, "
