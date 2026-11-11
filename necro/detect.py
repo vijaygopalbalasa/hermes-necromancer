@@ -584,7 +584,7 @@ _UNITTEST_RAN = re.compile(r"^Ran (\d+) tests? in", re.MULTILINE)
 _UNITTEST_FAILED = re.compile(r"^FAILED \(([^)]*)\)", re.MULTILINE)
 _JEST = re.compile(r"^Tests:\s+(.*?)(\d+) total", re.MULTILINE)
 _VITEST = re.compile(r"^\s*Tests\s+(?:(\d+) failed\s*\|\s*)?(?:(\d+) passed)?.*?\((\d+)\)", re.MULTILINE)
-_NODE = re.compile(r"^# (tests|fail) (\d+)$", re.MULTILINE)
+_NODE = re.compile(r"^[#\u2139] (tests|fail) (\d+)$", re.MULTILINE)  # TAP (#) and spec (\u2139) reporters
 _CARGO = re.compile(r"^test result: \w+\. (\d+) passed; (\d+) failed;", re.MULTILINE)
 
 

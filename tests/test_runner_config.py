@@ -223,6 +223,7 @@ class RunAtFreeze(unittest.TestCase):
             "Tests:       2 failed, 2 passed, 4 total\n": (2, 4),
             "      Tests  2 failed | 2 passed (4)\n": (2, 4),
             "# tests 4\n# pass 2\n# fail 2\n": (2, 4),
+            "\u2139 tests 2\n\u2139 pass 1\n\u2139 fail 1\n\u2716 failing tests:\n": (1, 2),
             "test result: FAILED. 1 passed; 1 failed; 0 ignored\n": (1, 2),
             "nothing to see\n": None,
         }
