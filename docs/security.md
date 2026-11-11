@@ -48,9 +48,10 @@ allowed. A pinned file that no longer parses fails closed, and a pin never opens
 link.
 
 `/necro freeze` writes these pins for you: the test script in `package.json`, every script it runs and their pre and
-post scripts, the `jest`, `mocha` and `ava` keys and test-runner config files; pytest's sections in
-`pyproject.toml`, `setup.cfg` and `tox.ini`, `pytest.ini` and its variants, and every `conftest.py`; Cargo's
-`[[test]]` tables and its `test`, `harness`, `doctest` and `autotests` keys. For your own command it also freezes the
+post scripts, the `jest`, `mocha` and `ava` keys, and the jest, vitest, vite and mocha config files; pytest's
+sections in `pyproject.toml`, `setup.cfg` and `tox.ini`, `pytest.ini` and its variants, and every `conftest.py`;
+Cargo's `[[test]]` tables, its `test`, `harness`, `doctest`, `autotests` and `build` keys, `build.rs` and
+`.cargo/config.toml`. A config file that exists is frozen whole; one that does not is pinned as absent. For your own command it also freezes the
 runner's file whole (a Makefile for `make`, `tox.ini`, `noxfile.py`, a justfile, a Taskfile) and any project file the
 command names, including inside `sh -c "..."`, and says plainly when it names one that cannot be locked.
 
@@ -89,9 +90,7 @@ receipt: .env)`. The answer is `CONFIRMED`, `MISMATCH` (naming what changed), `S
 - **The person check.** Hermes runs the agent's commands on pipes, but a background command with `pty=true` gets a
   real terminal, so the plugin also checks its own `NECRO_AGENT_SESSION` marker, Hermes's `HERMES_AGENT` variable and
   whether a Hermes process started the shell. Any of them refuses `freeze`, `approve` and `unfreeze` from a shell.
-- **What tests can see.** Code under test runs inside the test runner and can tamper with it, and settings outside
-  the project (a `pytest.ini` in a parent folder) or in shared build config (a `vite.config` that holds vitest
-  settings, a workspace member's `Cargo.toml`) are not pinned. A file in the project that changes how a test runs (a
+- **What tests can see.** Code under test runs inside the test runner and can tamper with it, and settings outside the project (a `pytest.ini` in a parent folder) or in a workspace member's `Cargo.toml` are not pinned. A file in the project that changes how a test runs (a
   `unittest.py` that shadows Python's own, even one git ignores) can make a local run pass; it is pinned and listed in
   the receipt, and `verify --run` in a fresh clone, which lacks it, fails. Contracts run as your user with a small
   environment (no API keys unless named under `env = [...]`).

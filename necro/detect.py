@@ -267,11 +267,13 @@ def as_run(command: str) -> str:
 # as absent when they do not, so adding one later counts; settings inside a shared file are pinned by field.
 PYTEST_FILES = ("pytest.ini", ".pytest.ini", "pytest.toml", ".pytest.toml", "**/conftest.py")
 PYTEST_PINS = ("pyproject.toml#tool.pytest", "setup.cfg#[tool:pytest]", "tox.ini#[pytest]")
-NODE_FILES = ("jest.config.*", "vitest.config.*", ".mocharc*")
+# vitest reads vite.config.* when there is no vitest.config.*
+NODE_FILES = ("jest.config.*", "vitest.config.*", "vite.config.*", ".mocharc*")
 NODE_PINS = ("package.json#jest", "package.json#mocha", "package.json#ava")
-CARGO_PINS = ("Cargo.toml#test", "Cargo.toml#package.autotests", "Cargo.toml#lib.test", "Cargo.toml#lib.harness",
-              "Cargo.toml#lib.doctest", "Cargo.toml#bin.*.test", "Cargo.toml#bin.*.harness")
-CONFIG_ONLY = set(PYTEST_FILES) | set(NODE_FILES)
+CARGO_FILES = (".cargo/config.toml", ".cargo/config", "build.rs")
+CARGO_PINS = ("Cargo.toml#test", "Cargo.toml#package.autotests", "Cargo.toml#package.build", "Cargo.toml#lib.test",
+              "Cargo.toml#lib.harness", "Cargo.toml#lib.doctest", "Cargo.toml#bin.*.test", "Cargo.toml#bin.*.harness")
+CONFIG_ONLY = set(PYTEST_FILES) | set(NODE_FILES) | set(CARGO_FILES)
 RUNNER_FILES = {
     "make": ("GNUmakefile", "makefile", "Makefile"), "gmake": ("GNUmakefile", "makefile", "Makefile"),
     "tox": ("tox.ini",), "nox": ("noxfile.py",), "just": ("justfile", "Justfile", ".justfile"),
@@ -423,6 +425,8 @@ def _one(root: Path, words: list, sh: Shape, have: set, top: bool, depth: int, s
         for pin in PYTEST_PINS:
             sh.add("pins", pin)
     if prog == "cargo" and args[:1] in (["test"], ["t"], ["nextest"]):
+        for item in CARGO_FILES:
+            _freeze_or_pin(root, item, have, sh)
         for pin in CARGO_PINS:
             sh.add("pins", pin)
     for name in RUNNER_FILES.get(prog, ()):

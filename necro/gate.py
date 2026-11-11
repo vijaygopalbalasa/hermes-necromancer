@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .canon import BudgetExceeded, canonical_json, check_deadline, file_pin, sha256_text
 from .lock import LOCK_REL, LockError, build_lock, drift, frozen_paths, lock_hash, read_lock
-from .pins import PinError, observe
+from .pins import PinError, observe, pinned_file
 from .receipts import SourcesError, build_receipt, escaping_links, git_ignored, pin_entry, source_files, write_receipt
 from .runner import all_pass, run_contracts
 from .spec import SpecError, expand, walk_files
@@ -77,19 +77,25 @@ def snapshot(root: Path, lk: dict, files: list, deadline=None) -> tuple:
     for rel in sorted(frozen | set(sources)):
         snap[rel] = file_pin(root / rel, deadline)
         check_deadline(deadline)
-    # What each pin sees, so a changed setting in a file outside sources = [...] still changes the digest.
+    return snap, sources
+
+
+def pin_snapshot(root: Path, lk: dict, files: list) -> dict:
+    """What each pin sees now, kept apart from file paths (a file may be named like anything): so a changed
+    setting in a file outside sources = [...] still changes the digest, and pins never reach a receipt."""
+    out = {}
     for c in lk.get("contracts", []):
         for entry in c.get("pins") or []:
             text = entry.get("pin", "")
             try:
-                snap[f"pin {text}"] = sha256_text(canonical_json(observe(root, text, files)))
+                out[text] = sha256_text(canonical_json(observe(root, text, files)))
             except PinError as exc:
-                snap[f"pin {text}"] = f"unreadable: {exc}"
-    return snap, sources
+                out[text] = f"unreadable: {exc}"
+    return out
 
 
-def _digest(lh: str, snap: dict) -> str:
-    return sha256_text(canonical_json({"lock": lh, "files": snap}))
+def _digest(lh: str, snap: dict, pins=None) -> str:
+    return sha256_text(canonical_json({"lock": lh, "files": snap, "pins": pins or {}}))
 
 
 def _approval_problem(approved, root: Path, lh: str) -> str | None:
@@ -120,7 +126,7 @@ def fingerprint(root, deadline=None) -> str | None:
         return None
     files = walk_files(root, deadline)
     snap, _ = snapshot(root, lk, files, deadline)
-    return _digest(lock_hash(lk), snap)
+    return _digest(lock_hash(lk), snap, pin_snapshot(root, lk, files))
 
 
 def evaluate(root, *, budget_s: float | None = None, deadline: float | None = None, approved=None,
@@ -152,6 +158,7 @@ def evaluate(root, *, budget_s: float | None = None, deadline: float | None = No
             problems.append(f"{LOCK_REL} does not match necro.toml and the frozen files, so it was not written by "
                             "freezing them. A person checks `git diff .necro/` and freezes again")
         before, _ = snapshot(root, lk, files, deadline)
+        pins_before = pin_snapshot(root, lk, files)
         escapes = escaping_links(root, before, before)
         if escapes:
             shown = ", ".join(escapes[:10]) + (" and more" if len(escapes) > 10 else "")
@@ -159,27 +166,31 @@ def evaluate(root, *, budget_s: float | None = None, deadline: float | None = No
                             "its target must be a file in the project; a person removes the link or points it at one")
         key = str(root)
         hit = cache.get(key) if cache is not None else None
-        if hit and hit["lock"] == lh and not d.contracts and _digest(lh, before) == hit["digest"]:
-            results, after, cached = hit["results"], before, True
+        if hit and hit["lock"] == lh and not d.contracts and _digest(lh, before, pins_before) == hit["digest"]:
+            results, after, pins_after, cached = hit["results"], before, pins_before, True
             sources = source_files(root, lk, files=files)
         else:
             cached = False
             results = run_contracts(root, lk, deadline=deadline, drift_result=d)
             grace = None if deadline is None else max(deadline, time.monotonic()) + POST_RUN_GRACE_S
-            after, sources = snapshot(root, lk, walk_files(root, grace), grace)
+            files_after = walk_files(root, grace)
+            after, sources = snapshot(root, lk, files_after, grace)
+            pins_after = pin_snapshot(root, lk, files_after)
             changed = sorted(p for p in set(before) | set(after) if before.get(p) != after.get(p))
+            changed += sorted({pinned_file(t) for t in set(pins_before) | set(pins_after)
+                               if pins_before.get(t) != pins_after.get(t)} - set(changed))
             if changed:
                 shown = ", ".join(changed[:10]) + (" and more" if len(changed) > 10 else "")
                 problems.append(f"the contract run changed {shown}. Code under test must not change project files; "
                                 "a person can declare files the contracts write under outputs = [...] in necro.toml")
             elif cache is not None and not any(r.status in ("skipped", "unfinished") for r in results):
-                cache[key] = {"lock": lh, "digest": _digest(lh, after), "results": results}
+                cache[key] = {"lock": lh, "digest": _digest(lh, after, pins_after), "results": results}
     except BudgetExceeded:
         return Verdict(False, root, lh, problems=[BUDGET_PROBLEM])
     except (SourcesError, SpecError) as exc:
         return Verdict(False, root, lh, problems=[str(exc)])
     ok = not problems and all_pass(results)
-    v = Verdict(ok, root, lh, results, problems, cached=cached, digest=_digest(lh, after))
+    v = Verdict(ok, root, lh, results, problems, cached=cached, digest=_digest(lh, after, pins_after))
     if ok:
         ignored = git_ignored(root, sources)
         pins = [pin_entry(p, after.get(p), p in ignored) for p in sources]

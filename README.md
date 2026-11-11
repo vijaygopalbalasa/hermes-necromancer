@@ -159,8 +159,10 @@ Under `plugins.entries.contract-necromancer.settings`: `gate_budget_seconds` (25
 - **Bounded.** After 3 nudges the reply goes out, stamped `Not done.` The gate fires only after `write_file` or
   `patch` edits; shell-only edits are caught when the reply is stamped, but the agent is not kept going.
 - **What tests can see.** Code under test runs inside the test runner and can cheat from there (special-casing the
-  inputs, say), and settings outside the project or in shared build config (a `vite.config` holding vitest settings)
-  are not pinned. Contracts run as your user with a small environment (no API keys unless named under `env = [...]`).
+  inputs, say), and settings outside the project (a `pytest.ini` in a parent folder) or in a workspace member's
+  `Cargo.toml` are not pinned. Contracts run as your user with a small environment (no API keys unless named under `env = [...]`).
+- **Runner files.** For your own command, a runner's file (a Makefile, `tox.ini`, `noxfile.py`, a justfile, a
+  Taskfile) is locked when it exists at freeze; files it includes or calls are not, unless the command names them.
 - **Slow or huge.** Contracts slower than the gate's budget are reported as not checked (the agent is told to run
   `necro_check`, which has 10 minutes); in a very large project, list the files that matter under `sources`.
 - **Tested** on macOS with Hermes 0.23.1 and 0.22.7 and Python 3.11, 3.14 and 3.15. Linux and Windows are untested here; the
@@ -184,7 +186,7 @@ network calls, no telemetry, no credentials stored, no background processes.
 ## Tests
 
 ```
-python3 -m unittest discover -s tests                        # 355 tests, about 90 s
+python3 -m unittest discover -s tests                        # 369 tests, about 90 s
 python3 tests/e2e/run_in_hermes.py --hermes $(which hermes)    # the real Hermes agent loop
 ```
 

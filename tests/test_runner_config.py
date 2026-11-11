@@ -155,7 +155,9 @@ class GeneratedPins(unittest.TestCase):
     def test_cargo_pins_its_test_keys(self):
         with Folder({"Cargo.toml": '[package]\nname = "x"\nversion = "0.1.0"\n', "tests/it.rs": ""}) as f:
             _, c = self.freeze(f)
-            self.assertEqual([p["pin"] for p in c["pins"]], list(detect.CARGO_PINS))
+            pins = [p["pin"] for p in c["pins"]]
+            for want in detect.CARGO_PINS:
+                self.assertIn(want, pins)
 
 
 class PersonsCommand(unittest.TestCase):
@@ -231,9 +233,6 @@ class RunAtFreeze(unittest.TestCase):
             self.assertEqual(detect.test_counts(text), want, text)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class PinsAndTheCache(unittest.TestCase):
     """Review, Nov 11: a pinned file outside sources = [...] is not in the gate's snapshot, so a cached pass
@@ -262,3 +261,60 @@ class PinsAndTheCache(unittest.TestCase):
             self.assertTrue(verdict(f, approvals).ok)
             f.write("pyproject.toml", pyproject.replace("2026-11-11", "2026-11-12"))
             self.assertIn("the pytest settings in pyproject.toml changed (tool.pytest)", reasons(verdict(f, approvals)))
+
+
+class PinKeysStandApart(unittest.TestCase):
+    """Security review, Nov 11: pin observations live apart from file paths, so a file named like a pin key never
+    collides with one, and pin keys never reach a receipt or the list of files a run changed."""
+
+    def test_a_file_named_like_a_pin_key_is_hashed_as_a_file(self):
+        import hashlib
+        weird = "pin package.json#scripts.test"
+        with Folder({"tests/a.test.js": "", "package.json": json.dumps(PACKAGE), weird: "hello\n",
+                     "necro.toml": spec(["package.json#scripts.test"])}) as f:
+            approvals = frozen(f)
+            v = verdict(f, approvals)
+            self.assertTrue(v.ok, v.problems)
+            rc = json.loads(v.receipt_path.read_text())
+            entry = {s["path"]: s for s in rc["sources"]}[weird]
+            self.assertEqual(entry["sha256"], hashlib.sha256(b"hello\n").hexdigest())
+            self.assertFalse(any(s["path"].startswith("pin ") and s["path"] != weird for s in rc["sources"]))
+            cache = {}
+            gate.evaluate(f.dir, budget_s=60, approved=approvals.mapping(), cache=cache)
+            f.write(weird, "changed\n")
+            again = gate.evaluate(f.dir, budget_s=60, approved=approvals.mapping(), cache=cache)
+            self.assertFalse(again.cached, "an edit to that file must not reuse the cached run")
+
+
+class MoreRunnerFiles(unittest.TestCase):
+    """Security review, Nov 11: vitest reads vite.config.* when there is no vitest.config.*; cargo reads
+    .cargo/config(.toml) and build.rs, and package.build names another build script."""
+
+    def freeze(self, f):
+        with mock.patch.object(detect, "runner_problem", no_runner_problem), \
+                mock.patch.object(commands, "right_now", not_run):
+            out, code = run(f, "freeze")
+        self.assertEqual(code, 0, out)
+        c = lock.read_lock(f.dir)["contracts"][0]
+        return c["patterns"], [p["pin"] for p in c.get("pins", [])]
+
+    def test_vite_config_is_frozen_when_there_and_kept_absent_when_not(self):
+        package = json.dumps({"scripts": {"test": "vitest run"}})
+        with Folder({"package.json": package, "src/a.test.ts": "", "vite.config.ts": "export default {}\n"}) as f:
+            patterns, pins = self.freeze(f)
+            self.assertIn("vite.config.*", patterns)
+        with Folder({"package.json": package, "src/a.test.ts": ""}) as f:
+            patterns, pins = self.freeze(f)
+            self.assertIn("vite.config.*", pins)
+
+    def test_cargo_build_files_and_package_build(self):
+        cargo = '[package]\nname = "x"\nversion = "0.1.0"\n'
+        with Folder({"Cargo.toml": cargo, "tests/it.rs": "", "build.rs": "fn main() {}\n"}) as f:
+            patterns, pins = self.freeze(f)
+            self.assertIn("build.rs", patterns)
+            for want in (".cargo/config.toml", ".cargo/config", "Cargo.toml#package.build"):
+                self.assertIn(want, pins)
+
+
+if __name__ == "__main__":
+    unittest.main()
