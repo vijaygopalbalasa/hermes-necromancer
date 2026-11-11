@@ -243,6 +243,22 @@ class Detection(unittest.TestCase):
                 got = detect.detect(f.dir)
             self.assertIn("This folder has 3 files, and I lock at most 2 as one project.", got.problem)
 
+    def test_the_big_repo_route_ends_locked_with_the_suggested_command(self):
+        with Folder({"src/a.py": "", "src/b.py": "", "tests/test_a.py": PYTEST_BARE_TEST, ".venv/bin/python": ""}) as f:
+            with mock.patch.object(detect, "MAX_SOURCES", 2):
+                text, _ = run(f, "freeze")
+                self.assertIn('sources = ["src/**", "tests/**"]', text)
+                f.write("necro.toml", 'sources = ["tests/**"]\n')
+                with mock.patch.object(detect, "_imports", return_value=False):
+                    text, _ = run(f, "freeze")
+                self.assertIn("for example /necro freeze .venv/bin/python -m pytest -q", text)
+                with mock.patch.object(detect, "runner_problem", no_runner_problem), \
+                        mock.patch.object(commands, "right_now", not_run):
+                    text, code = run(f, "freeze .venv/bin/python -m pytest -q")
+            self.assertEqual(code, 0, text)
+            self.assertEqual(lock.read_lock(f.dir)["contracts"][0]["run"], ".venv/bin/python -m pytest -q")
+            self.assertTrue(f.read("necro.toml").startswith('sources = ["tests/**"]\n'))
+
     def test_too_many_files_names_the_real_count_and_a_sources_line_that_works(self):
         with Folder({"src/a.py": "", "src/b.py": "", "tests/test_a.py": UNITTEST_TEST}) as f:
             with mock.patch.object(detect, "MAX_SOURCES", 2):
@@ -385,9 +401,9 @@ class FreezeWithoutNecroToml(unittest.TestCase):
             with mock.patch.object(detect, "_imports", return_value=False):
                 text, code = run(f, "freeze")
             self.assertNotEqual(code, 0)
-            self.assertEqual(text, "Nothing locked: Hermes runs tests with its own Python, which can't import pytest. "
-                                   "Your project has .venv/bin/python; type /necro freeze .venv/bin/python -m pytest -q "
-                                   "to use it.")
+            self.assertEqual(text, "Nothing locked: the python3 that Hermes's tools run can't import pytest. Type /necro "
+                                   "freeze <a Python that has pytest> -m pytest -q, for example /necro freeze "
+                                   ".venv/bin/python -m pytest -q.")
             self.assertNotIn("virtualenv active", text)
             self.assertEqual(f.state(), before)
 
@@ -628,7 +644,8 @@ class StatusAfterAFreeze(unittest.TestCase):
                     mock.patch.object(commands, "right_now", not_run):
                 run(f, "freeze", approvals)
             text, _ = run(f, "status", approvals)
-            self.assertIn("Settings: package.json scripts.test and 5 more.", text)
+            self.assertIn("Settings: package.json: scripts.test.", text)
+            self.assertNotIn("more", text)
 
 
 class GeneratedToml(unittest.TestCase):

@@ -149,8 +149,8 @@ Hermes: `python3 <plugin folder>/necro verify .necro/receipts/<hash>.json --run`
   each contract's result and every project file, and `/necro verify` answers `CONFIRMED`, `MISMATCH` (naming what
   changed), `SUPERSEDED` (frozen again since) or `HASHES MATCH` (files match, nothing re-run). Credential files are
   never opened and links never followed; the exact rules are in [docs/security.md](docs/security.md).
-- **Your PATH.** Contracts run with the PATH Hermes was started with, minus Hermes's own runtime (which Hermes puts
-  first), so `python3` is yours, not Hermes's.
+- **Your PATH.** Contracts run with the PATH of the Hermes process that runs your agent, minus Hermes's own runtime
+  (which Hermes puts first), so `python3` is the one found there, not Hermes's.
 - **Tools.** `necro_status` and `necro_check` let the agent see and re-run the contracts (Hermes lists plugin tools
   behind `tool_search`).
 
@@ -199,7 +199,7 @@ network calls, no telemetry, no credentials stored, no background processes.
 ## Tests
 
 ```
-python3 -m unittest discover -s tests                        # 383 tests, about 90 s
+python3 -m unittest discover -s tests                        # 384 tests, about 90 s
 python3 tests/e2e/run_in_hermes.py --hermes $(which hermes)    # the real Hermes agent loop
 ```
 

@@ -199,7 +199,7 @@ class PersonsCommand(unittest.TestCase):
         with Folder({"tests/test_a.py": "import pytest\n", ".venv/bin/python": ""}) as f:
             text, code = self.freeze(f, "freeze .venv/bin/python -m pytest -q")
             self.assertEqual(code, 0, text)
-            self.assertIn("(.venv itself is not locked.)", text)
+            self.assertIn("(.venv/bin/python and pyvenv.cfg are pinned; packages installed in .venv are not locked.)", text)
             self.assertEqual(lock.read_lock(f.dir)["contracts"][0]["run"], ".venv/bin/python -m pytest -q")
 
     def test_status_runs_the_same_check_as_freeze(self):
@@ -207,7 +207,8 @@ class PersonsCommand(unittest.TestCase):
             with mock.patch.object(detect, "_imports", return_value=False):
                 text, _ = run(f, "status")
             self.assertNotIn("Type /necro freeze to lock them", text)
-            self.assertIn("type /necro freeze .venv/bin/python -m pytest -q to use it", text)
+            self.assertIn("The python3 that Hermes's tools run can't import pytest.", text)
+            self.assertIn("for example /necro freeze .venv/bin/python -m pytest -q", text)
 
 
 class RunAtFreeze(unittest.TestCase):
@@ -459,6 +460,8 @@ class TheNamedVenvIsPinned(unittest.TestCase):
                     mock.patch.object(commands, "right_now", not_run):
                 text, code = run(f, "freeze .venv/bin/python -m unittest discover -q -s tests", approvals)
             self.assertEqual(code, 0, text)
+            self.assertIn("(.venv/bin/python and pyvenv.cfg are pinned; packages installed in .venv are not locked.)", text)
+            self.assertNotIn("is a link", text)
             pins = [p["pin"] for p in lock.read_lock(f.dir)["contracts"][0]["pins"]]
             self.assertIn(".venv/pyvenv.cfg", pins)
             self.assertIn(".venv/bin/python", pins)

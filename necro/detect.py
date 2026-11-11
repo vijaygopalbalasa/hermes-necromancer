@@ -340,6 +340,7 @@ class Shape:
     unlockable: list = field(default_factory=list)  # files the command names that cannot be locked, in plain words
     refusal: str | None = None                      # why this command cannot be locked at all
     venv: str | None = None                         # the project's virtualenv folder the command runs from
+    venv_python: str | None = None                  # and the interpreter in it the command names
 
     def add(self, kind: str, item: str) -> None:
         bucket = getattr(self, kind)
@@ -446,7 +447,7 @@ def _one(root: Path, words: list, sh: Shape, have: set, top: bool, depth: int, s
         if hidden and rel in VENV_PYTHONS and project_python(root):
             # The person named their virtualenv's Python: it runs, its folder stays unlocked, but its pyvenv.cfg and
             # the interpreter link's own text are pinned, so swapping the interpreter counts as tampering.
-            sh.venv = hidden
+            sh.venv, sh.venv_python = hidden, rel
             sh.add("pins", f"{hidden}/pyvenv.cfg")
             sh.add("pins", rel)
         elif hidden:
@@ -484,7 +485,7 @@ def _one(root: Path, words: list, sh: Shape, have: set, top: bool, depth: int, s
     for name in RUNNER_FILES.get(prog, ()):
         if name in have and _freezable(root, name):
             sh.add("files", name)
-    for word in ([exe] if "/" in exe else []) + args:
+    for word in ([exe] if "/" in exe and not (top and sh.venv_python) else []) + args:  # a named venv python is pinned
         if word.startswith("-"):
             if "=" not in word:
                 continue

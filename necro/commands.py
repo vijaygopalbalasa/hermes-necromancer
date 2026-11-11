@@ -17,6 +17,7 @@ from . import detect
 from .canon import utc_now, write_text_atomic
 from .gate import APPROVAL_TAMPERED, BUDGET_PROBLEM, evaluate
 from .lock import LOCK_REL, LockError, drift, find_root, freeze, lock_hash, lock_path, read_lock
+from .pins import PinError, observe
 from .receipts import list_receipts
 from .runner import contract_env
 from .spec import SPEC_NAME, SpecError, load_spec
@@ -197,10 +198,15 @@ def status(cwd, approvals: Approvals) -> tuple:
     for c in contracts:
         for pin in c.get("pins") or []:
             file, _, field = pin["pin"].partition("#")
-            if field:
-                by_file.setdefault(file, []).append(field)
-    settings = "; ".join(f"{file} {fields[0]}" + (f" and {len(fields) - 1} more" if len(fields) > 1 else "")
-                         for file, fields in by_file.items())
+            if not field:
+                continue
+            try:
+                seen = observe(root, pin["pin"])
+            except PinError:
+                seen = None
+            if seen not in (["absent"], ["field", None]) and field not in by_file.get(file, []):
+                by_file.setdefault(file, []).append(field)  # only settings that exist: absent ones say nothing
+    settings = "; ".join(f"{file}: {', '.join(fields)}" for file, fields in by_file.items())
     since = _local_time(lk.get("frozenAt"))
     if len(contracts) == 1:
         lines = [f"Locked since {since} (local time): `{contracts[0]['run']}` must pass. Locked files: {shown}."]
@@ -250,17 +256,16 @@ TOML_EXAMPLE = """    [[contract]]
 
 
 def runner_advice(root: Path, run: str, problem: str) -> str:
-    """What to do when the test command cannot run here, the same words for /necro status and /necro freeze."""
+    """What to do when the test command cannot run here, the same words for /necro status and /necro freeze.
+    Starts lower case, to follow "Nothing locked: "."""
     if "import pytest" in problem:
         venv = detect.project_python(root)
-        if venv and not run.startswith(venv.rsplit("/", 2)[0] + "/"):
-            return (f"Hermes runs tests with its own Python, which can't import pytest. Your project has {venv}; type "
-                    f"/necro freeze {venv} -m pytest -q to use it.")
-        if venv:
-            return f"{venv} can't import pytest. Install pytest there, or type /necro freeze <your test command>."
-        return ("Hermes runs tests with its own Python, which can't import pytest, and this folder has no "
-                ".venv/bin/python. Type /necro freeze <a python that has pytest> -m pytest -q.")
-    return f"{problem[0].upper()}{problem[1:]}. Install it, or type /necro freeze <your test command>."
+        if venv and run.startswith(venv.split("/", 1)[0] + "/"):
+            return (f"{venv} can't import pytest. Install pytest there, or type /necro freeze <a Python that has "
+                    "pytest> -m pytest -q.")
+        return ("the python3 that Hermes's tools run can't import pytest. Type /necro freeze <a Python that has "
+                f"pytest> -m pytest -q, for example /necro freeze {venv or '/path/to/venv/bin/python'} -m pytest -q.")
+    return f"{problem}. Install it, or type /necro freeze <your test command>."
 
 
 def nothing_set_up(cwd) -> str:
@@ -275,7 +280,8 @@ def nothing_set_up(cwd) -> str:
     if found.run and what:
         problem = detect.runner_problem(found.run, here)
         if problem:
-            return f"Nothing is locked in {name} yet. Found your tests: {what}. {runner_advice(here, found.run, problem)}"
+            advice = runner_advice(here, found.run, problem)
+            return f"Nothing is locked in {name} yet. Found your tests: {what}. {advice[0].upper()}{advice[1:]}"
         return f"Nothing is locked in {name} yet. Found your tests: {what}, run with `{found.run}`. Type /necro freeze to lock them."
     if what:
         return (f"Nothing is locked in {name} yet. Found test files ({what}) but not the command that runs them. "
@@ -423,7 +429,8 @@ def _freeze_found(root: Path, approvals: Approvals, command: str | None, cache=N
              "files are blocked. Saved in necro.toml; to change what counts as done, edit it and type /necro freeze "
              "again. Undo: /necro unfreeze.")
     if shaped.venv:
-        reply += f" ({shaped.venv} itself is not locked.)"
+        reply += (f" ({shaped.venv_python} and pyvenv.cfg are pinned; packages installed in {shaped.venv} are not "
+                  "locked.)")
     if shaped.unlockable:
         reply += " Not locked: " + "; ".join(shaped.unlockable) + "."
     if approvals.store is None:
@@ -445,12 +452,12 @@ def do_freeze(cwd, approvals: Approvals, command: str | None = None, cache=None,
     if not (root / SPEC_NAME).is_file():
         return (f"Could not freeze: {root} has a lock ({LOCK_REL}) but no {SPEC_NAME}. Put {SPEC_NAME} back (for "
                 "example from git), or type /necro unfreeze to start over."), 1
+    partial = _sources_only(root)
+    if partial and find_root(root) is None:  # it lists only which folders count: fill in the contract
+        return _freeze_found(root, approvals, command, cache, run_budget_s, partial)
     if command:
         return (f"Nothing changed: {root / SPEC_NAME} already says what counts as done here. To use `{command}`, "
                 f"change run in {SPEC_NAME}, then type /necro freeze."), 1
-    partial = _sources_only(root)
-    if partial and find_root(root) is None:
-        return _freeze_found(root, approvals, None, cache, run_budget_s, partial)
     try:
         lk = freeze(root)
     except (SpecError, OSError) as exc:
