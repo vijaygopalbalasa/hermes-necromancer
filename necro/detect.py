@@ -214,15 +214,16 @@ def detect(root, budget_s: float = 60.0) -> Found:
     except (RuntimeError, OSError):
         home = None
     if root == home:
-        found.problem = f"{root} is your home folder, not a project folder"
+        found.problem = "This is your home folder, not a project folder. Open Hermes in your project's folder."
         return found
     if root == Path(root.anchor):
-        found.problem = f"{root} is the top of the disk, not a project folder"
+        found.problem = "This is the top of the disk, not a project folder. Open Hermes in your project's folder."
         return found
     try:
         files = walk_files(root, time.monotonic() + budget_s)
     except BudgetExceeded:
-        found.problem = f"{root} took too long to read, so it may hold more than one project"
+        found.problem = ("This folder took too long to read. To lock part of it, list the folders that matter in "
+                         'necro.toml, e.g. sources = ["src/**", "tests/**"], then type /necro freeze.')
         return found
     if len(files) > MAX_SOURCES:
         found.problem = f"{root} has more than {MAX_SOURCES:,} files, too many to lock as one project"
@@ -237,12 +238,20 @@ def detect(root, budget_s: float = 60.0) -> Found:
     return found
 
 
+def shown(pattern: str) -> str:
+    """A pattern as a person reads it: a whole folder is "tests/", not "tests/**"."""
+    core = pattern[3:] if pattern.startswith("**/") else pattern
+    if core.endswith("/**") and not GLOB_CHARS & set(core[:-3]):
+        return core[:-2]
+    return pattern
+
+
 def describe(patterns: list, count: int) -> str:
-    """'tests/**, **/conftest.py (13 files)': the globs, the plain paths when there are few, and the count."""
-    globs = [p for p in patterns if GLOB_CHARS & set(p)]
-    plain = [p for p in patterns if p not in globs]
-    shown = globs + (plain if len(plain) <= 3 else [f"{len(plain)} {'more ' if globs else ''}test files"])
-    return f"{', '.join(shown)} ({count} {'file' if count == 1 else 'files'})"
+    """'tests/, **/conftest.py (13 files)': the folders and globs, the plain paths when there are few, and the count."""
+    globs = [shown(p) for p in patterns if GLOB_CHARS & set(p)]
+    plain = [p for p in patterns if not GLOB_CHARS & set(p)]
+    shown_ = globs + (plain if len(plain) <= 3 else [f"{len(plain)} {'more ' if globs else ''}test files"])
+    return f"{', '.join(shown_)} ({count} {'file' if count == 1 else 'files'})"
 
 
 def as_run(command: str) -> str:
@@ -287,6 +296,20 @@ YARN_BUILTINS = {"add", "install", "remove", "upgrade", "init", "info", "dlx", "
                  "config", "cache", "global", "why", "link", "unlink", "pack", "publish", "set", "up", "node"}
 
 
+VENV_PYTHONS = (".venv/bin/python", "venv/bin/python", ".venv/bin/python3", "venv/bin/python3")
+
+
+def project_python(root) -> str | None:
+    """The project's own virtualenv Python (.venv/bin/python or venv/bin/python), when its folder is a real one
+    inside the project. Only looked at, never run: a person names it in their command to use it."""
+    root = Path(root)
+    for rel in VENV_PYTHONS[:2]:
+        folder = root / rel.split("/", 1)[0]
+        if os.path.isdir(folder) and not os.path.islink(folder) and os.path.isfile(root / rel):
+            return rel
+    return None
+
+
 @dataclass
 class Shape:
     """What a run depends on besides its test files."""
@@ -294,6 +317,7 @@ class Shape:
     pins: list = field(default_factory=list)        # settings pinned by field, or files that must stay absent
     unlockable: list = field(default_factory=list)  # files the command names that cannot be locked, in plain words
     refusal: str | None = None                      # why this command cannot be locked at all
+    venv: str | None = None                         # the project's virtualenv folder the command runs from
 
     def add(self, kind: str, item: str) -> None:
         bucket = getattr(self, kind)
@@ -397,16 +421,18 @@ def _one(root: Path, words: list, sh: Shape, have: set, top: bool, depth: int, s
     if top and "/" in exe:
         rel = _rel(root, exe)
         hidden = _hidden_in(rel) if rel else None
-        if hidden:
+        if hidden and rel in VENV_PYTHONS and project_python(root):
+            sh.venv = hidden  # the person named their virtualenv's Python: it runs, and .venv stays unlocked
+        elif hidden:
             rest = " ".join(args)
-            if prog.startswith("python") or prog in ("pytest", "py.test"):
-                instead = "python3 " + (rest if prog.startswith("python") else f"-m pytest {rest}".strip())
+            venv = project_python(root)
+            if prog in ("pytest", "py.test") and venv:
+                instead = f"/necro freeze {venv} -m pytest {rest}".strip()
             elif hidden == "node_modules":
-                instead = f"npx {prog} {rest}".strip()
+                instead = f"/necro freeze npx {prog} {rest}".strip()
             else:
-                instead = "a program on your PATH"
-            sh.refusal = (f"that program ({exe}) lives in {hidden}, which is not locked; use {instead.strip()}, or "
-                          "lock it yourself in necro.toml")
+                instead = "/necro freeze with a program on your PATH"
+            sh.refusal = f"that program ({exe}) lives in {hidden}, which is never locked; type {instead} instead"
             return
     if prog in SHELLS and len(args) >= 2 and args[0] == "-c":
         for inner in _words_of(args[1]):
@@ -493,15 +519,17 @@ def shape(root, run: str, listing: list) -> Shape:
 
 
 def pins_phrase(pins: list) -> str:
-    """The pinned settings in plain words, for the reply."""
+    """The pinned settings in plain words, for the freeze reply."""
     parts = []
-    if any(p.startswith("package.json#") for p in pins):
-        parts.append("the test settings in package.json")
+    if any(p.startswith("package.json#scripts.") for p in pins):
+        parts.append("the test script in package.json")
     if any(p in PYTEST_PINS or p in PYTEST_FILES for p in pins):
         parts.append("pytest's settings")
     if any(p.startswith("Cargo.toml#") for p in pins):
         parts.append("the test settings in Cargo.toml")
-    return " and ".join(parts)
+    if not parts:
+        return ""
+    return " and ".join(parts) + " (other edits there, like dependencies, are fine)"
 
 
 def _imports(python: str, module: str, env: dict) -> bool:

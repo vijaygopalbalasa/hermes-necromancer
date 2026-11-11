@@ -206,33 +206,52 @@ TOML_EXAMPLE = """    [[contract]]
     files = ["path/to/your/tests/**"]"""
 
 
+def runner_advice(root: Path, run: str, problem: str) -> str:
+    """What to do when the test command cannot run here, the same words for /necro status and /necro freeze."""
+    if "import pytest" in problem:
+        venv = detect.project_python(root)
+        if venv and not run.startswith(venv.rsplit("/", 2)[0] + "/"):
+            return (f"Hermes runs tests with its own Python, which can't import pytest. Your project has {venv}; type "
+                    f"/necro freeze {venv} -m pytest -q to use it.")
+        if venv:
+            return f"{venv} can't import pytest. Install pytest there, or type /necro freeze <your test command>."
+        return ("Hermes runs tests with its own Python, which can't import pytest, and this folder has no "
+                ".venv/bin/python. Type /necro freeze <a python that has pytest> -m pytest -q.")
+    return f"{problem[0].upper()}{problem[1:]}. Install it, or type /necro freeze <your test command>."
+
+
 def nothing_set_up(cwd) -> str:
-    """One line for /necro status before anything is frozen: what /necro freeze would lock here."""
+    """One line for /necro status before anything is frozen: what /necro freeze would lock here, and only "type
+    /necro freeze" when that freeze would work."""
     here = Path(cwd).expanduser().resolve()
     found = detect.detect(here, budget_s=5.0)
     if found.problem:
-        return f"Nothing is locked here: {found.problem}. Open Hermes in your project's folder, then type /necro freeze."
+        return f"Nothing is locked here. {found.problem}"
+    name = here.name or str(here)
     what = detect.describe(found.patterns, len(found.files)) if found.patterns else None
     if found.run and what:
-        return f"Nothing is locked in {here} yet. Found your tests: {what}, run with `{found.run}`. Type /necro freeze to lock them."
+        problem = detect.runner_problem(found.run, here)
+        if problem:
+            return f"Nothing is locked in {name} yet. Found your tests: {what}. {runner_advice(here, found.run, problem)}"
+        return f"Nothing is locked in {name} yet. Found your tests: {what}, run with `{found.run}`. Type /necro freeze to lock them."
     if what:
-        return (f"Nothing is locked in {here} yet. Found test files ({what}) but not the command that runs them. "
+        return (f"Nothing is locked in {name} yet. Found test files ({what}) but not the command that runs them. "
                 "Type /necro freeze <your test command> to lock them.")
     if found.run:
-        return (f"Nothing is locked in {here} yet. It looks like a {detect.KINDS[found.kind]} project (`{found.run}`), "
+        return (f"Nothing is locked in {name} yet. It looks like a {detect.KINDS[found.kind]} project (`{found.run}`), "
                 "but it has no test files to lock. Type /necro help to see how to lock your tests.")
-    return (f"Nothing is locked in {here} yet, and no tests were found here. Type /necro freeze <your test command>, "
+    return (f"Nothing is locked in {name} yet, and no tests were found here. Type /necro freeze <your test command>, "
             "or /necro help.")
 
 
 def _no_tests(found, command: str | None) -> str:
     example = TOML_EXAMPLE.format(run=json.dumps(command or found.run or "python3 -m pytest -q"))
     if command:
-        return (f"Nothing locked: `{command}` names no file in {found.root}, and no test files were found here "
+        return (f"Nothing locked: `{command}` names no file in {found.root.name}, and no test files were found here "
                 f"(looked for {detect.LOOKED_FOR}). Write {SPEC_NAME} like this, then type /necro freeze:\n{example}")
     seen = (f" It looks like a {detect.KINDS[found.kind]} project (`{found.run}`), but there is no test file to lock."
             if found.run else "")
-    return (f"Nothing locked: no test files in {found.root} (looked for {detect.LOOKED_FOR}).{seen}\n"
+    return (f"Nothing locked: no test files in {found.root.name} (looked for {detect.LOOKED_FOR}).{seen}\n"
             "Two ways forward:\n"
             "  - type /necro freeze <your test command>; it locks the test files it finds and any file here the "
             "command names, such as a test script\n"
@@ -265,10 +284,9 @@ def right_now(root: Path, approvals: Approvals, cache=None, budget_s: float = FR
         return "Right now: the test passes." if total == 1 else f"Right now: all {total} tests pass."
     if failing and total:
         if total == 1:
-            return "Right now: the test fails. Hermes can't say done until it passes."
-        return (f"Right now: {failing} of {total} tests {'fails' if failing == 1 else 'fail'}. Hermes can't say done "
-                "until they pass.")
-    return "Right now: the tests fail. Hermes can't say done until they pass."
+            return "Right now: the test fails."
+        return f"Right now: {failing} of {total} tests {'fails' if failing == 1 else 'fail'}."
+    return "Right now: the tests fail."
 
 
 def _freeze_found(root: Path, approvals: Approvals, command: str | None, cache=None,
@@ -280,7 +298,7 @@ def _freeze_found(root: Path, approvals: Approvals, command: str | None, cache=N
                 f"a regular {SPEC_NAME} there, or remove the link and type /necro freeze again."), 1
     found = detect.detect(root)
     if found.problem:
-        return f"Nothing locked: {found.problem}. Open Hermes in your project's folder and type /necro freeze there.", 1
+        return f"Nothing locked: {found.problem}", 1
     if command:
         try:
             run = detect.as_run(command)
@@ -290,7 +308,7 @@ def _freeze_found(root: Path, approvals: Approvals, command: str | None, cache=N
         run = found.run
         if run is None and found.patterns:
             what = detect.describe(found.patterns, len(found.files))
-            return (f"Nothing locked: found test files in {root}, {what}, but not the command that runs them. "
+            return (f"Nothing locked: found test files in {root.name}, {what}, but not the command that runs them. "
                     "Type /necro freeze <your test command>, for example /necro freeze make test, to lock them "
                     "with it."), 1
     if run is None:
@@ -305,12 +323,7 @@ def _freeze_found(root: Path, approvals: Approvals, command: str | None, cache=N
         return _no_tests(found, command), 1
     problem = detect.runner_problem(run, root)
     if problem:
-        if "import pytest" in problem:
-            fix = ("Start Hermes where pytest is installed (for example with your virtualenv active), or type "
-                   "/necro freeze <your test command>.")
-        else:
-            fix = "Install it, or type /necro freeze <your test command>."
-        return f"Nothing locked: found your tests, {detect.describe(patterns, len(found.files))}, but {problem}. {fix}", 1
+        return f"Nothing locked: {runner_advice(root, run, problem)}", 1
     text = detect.toml_text(run, patterns, found.outputs, shaped.pins)
     path = root / SPEC_NAME
     try:
@@ -326,9 +339,12 @@ def _freeze_found(root: Path, approvals: Approvals, command: str | None, cache=N
     approvals.approve(root, lock_hash(lk))
     count = len({f["path"] for c in lk["contracts"] for f in c["files"]})
     also = detect.pins_phrase(shaped.pins)
-    reply = (f"Locked your tests: `{run}` must pass. Frozen: {detect.describe(patterns, count)}"
-             f"{', and ' + also if also else ''}. Hermes can't say \"done\" until this passes, and it can't edit these "
-             "files. Undo: /necro unfreeze. Change what counts as done: edit necro.toml, then /necro freeze.")
+    reply = (f"Locked your tests: `{run}` must pass. Locked files: {detect.describe(patterns, count)}"
+             f"{' and ' + also if also else ''}. Hermes's \"done\" won't count until this passes, and edits to these "
+             "files are blocked. Saved in necro.toml; to change what counts as done, edit it and type /necro freeze "
+             "again. Undo: /necro unfreeze.")
+    if shaped.venv:
+        reply += f" ({shaped.venv} itself is not locked.)"
     if shaped.unlockable:
         reply += " Not locked: " + "; ".join(shaped.unlockable) + "."
     if approvals.store is None:

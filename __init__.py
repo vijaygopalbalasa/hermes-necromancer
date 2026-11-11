@@ -348,7 +348,8 @@ def register(ctx):
         plugin.session_env_ok = False
         logger.warning("contract-necromancer: register_session_env is unavailable (Hermes before 0.23.1); "
                        "`hermes necro freeze/approve/unfreeze` will refuse, use /necro instead")
-    ctx.register_command("necro", plugin.slash, description="Frozen acceptance contracts: status, freeze, check, verify",
+    ctx.register_command("necro", plugin.slash,
+                         description="Lock your tests: Hermes's done counts only when they pass (freeze, status, check, verify)",
                          args_hint="[status|freeze|approve|unfreeze|check|verify|receipts|demo]")
     ctx.register_cli_command(name="necro", help="Frozen acceptance contracts and receipts (Contract Necromancer)",
                              setup_fn=plugin.cli_setup, handler_fn=plugin.cli_run,

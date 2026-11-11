@@ -199,8 +199,8 @@ def main() -> int:
         ("Zero config: `hermes necro freeze` from a script refused and wrote no necro.toml",
          script_freeze.returncode == 3 and nothing_written),
         ("Zero config: /necro freeze locked the tests, said so plainly and said where they stand",
-         reply.startswith("Locked your tests: `python3 -m unittest discover -q -s tests` must pass. Frozen: tests/** "
-                          "(4 files).") and "\nRight now: " in reply and generated.startswith("# Written by /necro freeze")
+         reply.startswith("Locked your tests: `python3 -m unittest discover -q -s tests` must pass. Locked files: "
+                          "tests/ (4 files).") and "\nRight now: " in reply and generated.startswith("# Written by /necro freeze")
          and (fresh / ".necro" / "lock.json").is_file()),
         ("Zero config: Hermes ran the turn (exit code 0)", fresh_turn.returncode == 0),
         ("Zero config: the first 'Done!' was refused with a note naming C1", any("C1" in n for n in fresh_seen["nudges"])),

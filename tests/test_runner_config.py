@@ -187,13 +187,27 @@ class PersonsCommand(unittest.TestCase):
             self.assertIn("Not locked: fixture.pem is a credential file, which Contract Necromancer never opens.", text)
 
     def test_a_program_inside_a_skipped_folder_is_refused(self):
-        with Folder({"tests/test_a.py": UNITTEST_TEST, ".venv/bin/pytest": ""}) as f:
+        with Folder({"tests/test_a.py": UNITTEST_TEST, ".venv/bin/pytest": "", ".venv/bin/python": ""}) as f:
             before = f.state()
             text, code = self.freeze(f, "freeze .venv/bin/pytest -q")
             self.assertNotEqual(code, 0)
-            self.assertIn("that program (.venv/bin/pytest) lives in .venv, which is not locked; use python3 -m pytest "
-                          "-q, or lock it yourself in necro.toml", text)
+            self.assertEqual(text, "Nothing locked: that program (.venv/bin/pytest) lives in .venv, which is never "
+                                   "locked; type /necro freeze .venv/bin/python -m pytest -q instead.")
             self.assertEqual(f.state(), before)
+
+    def test_the_projects_own_venv_python_is_accepted_and_said_unlocked(self):
+        with Folder({"tests/test_a.py": "import pytest\n", ".venv/bin/python": ""}) as f:
+            text, code = self.freeze(f, "freeze .venv/bin/python -m pytest -q")
+            self.assertEqual(code, 0, text)
+            self.assertIn("(.venv itself is not locked.)", text)
+            self.assertEqual(lock.read_lock(f.dir)["contracts"][0]["run"], ".venv/bin/python -m pytest -q")
+
+    def test_status_runs_the_same_check_as_freeze(self):
+        with Folder({"tests/test_a.py": "import pytest\n", ".venv/bin/python": ""}) as f:
+            with mock.patch.object(detect, "_imports", return_value=False):
+                text, _ = run(f, "status")
+            self.assertNotIn("Type /necro freeze to lock them", text)
+            self.assertIn("type /necro freeze .venv/bin/python -m pytest -q to use it", text)
 
 
 class RunAtFreeze(unittest.TestCase):
@@ -203,8 +217,7 @@ class RunAtFreeze(unittest.TestCase):
         with Folder({"calc.py": CALC_BUGGY, "tests/test_calc.py": self.TWO}) as f:
             text, code = run(f, "freeze")
             self.assertEqual(code, 0, text)
-            self.assertTrue(text.endswith("\nRight now: 1 of 2 tests fails. Hermes can't say done until they pass."),
-                            text)
+            self.assertTrue(text.endswith("\nRight now: 1 of 2 tests fails."), text)
 
     def test_it_says_when_all_pass(self):
         with Folder({"calc.py": CALC_FIXED, "tests/test_calc.py": self.TWO}) as f:
