@@ -567,6 +567,14 @@ class OneContractWording(unittest.TestCase):
             self.assertIn("Froze 1 contract (1 file) in", ctx.commands["necro"]("freeze"))
 
 
+class Describe(unittest.TestCase):
+    def test_globs_then_a_few_names_or_a_count(self):
+        self.assertEqual(detect.describe(["tests/**"], 1), "tests/** (1 file)")
+        self.assertEqual(detect.describe(["tests/**", "a.py", "b.py"], 5), "tests/**, a.py, b.py (5 files)")
+        self.assertEqual(detect.describe(["tests/**", "a", "b", "c", "d"], 9), "tests/**, 4 more test files (9 files)")
+        self.assertEqual(detect.describe(["a", "b", "c", "d"], 4), "4 test files (4 files)")
+
+
 class GeneratedToml(unittest.TestCase):
     def test_it_round_trips_quotes_and_backslashes_and_keeps_outputs_at_the_top(self):
         run_cmd = 'python3 -c "import sys; sys.exit(0)" C:\\x'

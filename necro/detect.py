@@ -239,7 +239,7 @@ def describe(patterns: list, count: int) -> str:
     """'tests/**, **/conftest.py (13 files)': the globs, the plain paths when there are few, and the count."""
     globs = [p for p in patterns if GLOB_CHARS & set(p)]
     plain = [p for p in patterns if p not in globs]
-    shown = globs + (plain if len(plain) <= 3 else [f"{len(plain)} more test files"])
+    shown = globs + (plain if len(plain) <= 3 else [f"{len(plain)} {'more ' if globs else ''}test files"])
     return f"{', '.join(shown)} ({count} {'file' if count == 1 else 'files'})"
 
 
