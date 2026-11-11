@@ -574,7 +574,7 @@ class OneContractWording(unittest.TestCase):
             ctx.hooks["pre_verify"](session_id="s", platform="cli", model="m", coding=True, attempt=0,
                                     final_response="Fixed.", changed_paths=[str(f.path("calc.py"))])
             out = ctx.hooks["transform_llm_output"](response_text="Fixed.", session_id="s", model="m", platform="cli")
-            self.assertIn("Contract Necromancer: the frozen acceptance contract passes. Receipt", out)
+            self.assertIn("Contract Necromancer: the test passes. Receipt", out)
             ctx.commands["necro"]("unfreeze")
             self.assertIn("Froze 1 contract (1 file) in", ctx.commands["necro"]("freeze"))
 

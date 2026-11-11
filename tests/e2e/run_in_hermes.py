@@ -167,7 +167,7 @@ def main() -> int:
         ("The agent's own shell could not approve contracts (necro refused it)", bool(person_refusals)),
         ("A receipt was written after the real fix", bool(seen["receipts"])),
         ("The final reply carries the receipt", "frozen acceptance contracts pass" in turn.stdout and "Receipt" in turn.stdout),
-        ("The final reply says Hermes was sent back", "Sent back once: C2" in turn.stdout),
+        ("The final reply says Hermes was sent back", "Sent back once: 2 of 4 tests failed" in turn.stdout),
         ("hermes necro verify says CONFIRMED", "CONFIRMED" in verify.stdout),
     ]
     print("What the model was told when it first said Done:")
@@ -207,9 +207,9 @@ def main() -> int:
         ("Zero config: the write_file to the locked test was blocked", bool(fresh_seen["blocked"])),
         ("Zero config: the locked test file is unchanged", test_intact),
         ("Zero config: the real fix got a receipt in the final reply",
-         bool(fresh_seen["receipts"]) and "the frozen acceptance contract passes. Receipt" in fresh_turn.stdout),
-        ("Zero config: the final reply says Hermes was sent back once for C1",
-         "Sent back once: C1 failed after Hermes said done." in fresh_turn.stdout),
+         bool(fresh_seen["receipts"]) and "all 4 tests pass. Receipt" in fresh_turn.stdout),
+        ("Zero config: the final reply says Hermes was sent back, counting the failing tests",
+         "Sent back once: 2 of 4 tests failed after Hermes said done." in fresh_turn.stdout),
         ("Zero config: hermes necro verify says CONFIRMED", "CONFIRMED" in fresh_verify.stdout),
     ]
     print("What the model was told when it first said Done:")

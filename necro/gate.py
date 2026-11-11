@@ -210,6 +210,117 @@ def _describe(r) -> str:
     return f"- {r.id} COULD NOT RUN{says}." + (f"\n{tail}" if tail else "")
 
 
+DEFAULT_SAYS = "Your tests pass"  # what /necro freeze writes; it names no requirement of its own
+NAME_MAX = 48
+_ERROR_LINE = re.compile(r"^[A-Za-z_][\w.]{0,80}(?:Error|Exception|Failure)\b")
+
+
+def _cut(name: str, limit: int = NAME_MAX) -> str:
+    return name if len(name) <= limit else name[: limit - 1] + "\u2026"
+
+
+def failing_tests(output: str) -> list:
+    """[(test name, error line or None)] read from the end of a run's output: unittest, pytest, jest, vitest,
+    node --test, go test and cargo test. Line by line, no backtracking; best effort."""
+    out, seen = [], set()
+    lines = (output or "").splitlines()
+
+    def add(name, error=None):
+        name = (name or "").strip()
+        if name and name not in seen and len(out) < 20:
+            seen.add(name)
+            out.append((name, error))
+
+    for i, line in enumerate(lines):
+        if line.startswith(("FAIL: ", "ERROR: ")) and " (" in line:  # unittest
+            error = None
+            for later in lines[i + 1:]:
+                if later.startswith(("=====", "-----")) and error:
+                    break
+                if later.startswith("====="):
+                    break
+                if _ERROR_LINE.match(later):
+                    error = later.strip()
+            add(line.split(": ", 1)[1].split(" (", 1)[0], error)
+        elif line.startswith(("FAILED ", "ERROR ")) and "::" in line:  # pytest
+            nodeid, _, error = line.split(" ", 1)[1].partition(" - ")
+            add(nodeid.split("::")[-1].split("[", 1)[0], error.strip() or None)
+        elif line.lstrip().startswith("\u25cf ") and "Test suite failed to run" not in line:  # jest
+            add(line.lstrip()[2:].split(" \u203a ")[-1])
+        elif line.lstrip().startswith("FAIL") and " > " in line:  # vitest
+            add(line.rsplit(" > ", 1)[1])
+        elif line.lstrip().startswith("\u2716 ") and " (" in line:  # node --test
+            add(line.lstrip()[2:].rsplit(" (", 1)[0])
+        elif line.lstrip().startswith("--- FAIL: "):  # go test
+            add(line.lstrip()[10:].split(" ", 1)[0])
+        elif line.startswith("test ") and line.endswith(" ... FAILED"):  # cargo test
+            add(line[5:-11].split("::")[-1])
+    return out
+
+
+def humanize(name: str) -> str:
+    """test_a_negative_total_is_refused -> 'a negative total is refused'; TestNegativeTotal -> 'negative total'."""
+    words = name.strip()
+    for prefix in ("test_", "Test_", "test", "Test"):
+        if words.startswith(prefix) and len(words) > len(prefix):
+            words = words[len(prefix):]
+            break
+    if "_" in words:
+        words = words.replace("_", " ")
+    elif " " not in words:
+        words = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", words).lower()
+    return words.strip() or name
+
+
+def _counts(results):
+    from .detect import test_counts
+    counts = [test_counts(r.output_tail) for r in results]
+    if not counts or not all(counts):
+        return None
+    return sum(c[0] for c in counts), sum(c[1] for c in counts)
+
+
+def describe_failures(v: Verdict) -> str:
+    """What failed, in a few words: the one failing test's name, else how many tests failed, else the contract."""
+    fails = v.failing()
+    if not fails:
+        return "the check"
+    if any(r.status == "tampered" for r in fails):
+        return "the check (a locked file changed)"
+    names = []
+    for r in fails:
+        names += [n for n, _ in failing_tests(r.output_tail) if n not in names]
+    if len(names) == 1:
+        return _cut(names[0])
+    counts = _counts(v.results)
+    if counts and counts[0]:
+        return f"{counts[0]} of {counts[1]} tests"
+    if len(fails) == 1:
+        says = fails[0].says
+        return "the tests" if says == DEFAULT_SAYS else (says or fails[0].id)
+    return " and ".join(r.id for r in fails)
+
+
+def _one_contract_result(v: Verdict) -> str:
+    """How a one-contract lock (what /necro freeze writes) stands, for the person: '1 of 4 tests fails'."""
+    r = v.results[0]
+    if r.status == "tampered":
+        return "a locked file changed (" + "; ".join(r.reasons) + ")"
+    if r.status == "timeout":
+        return "the tests timed out"
+    if r.status in ("unfinished", "skipped"):
+        return "the tests were not checked in time"
+    if r.status == "error":
+        return "the test command could not run"
+    counts = _counts(v.results)
+    if counts and counts[0]:
+        return f"{counts[0]} of {counts[1]} tests {'fails' if counts[0] == 1 else 'fail'}"
+    names = [n for n, _ in failing_tests(r.output_tail)]
+    if len(names) == 1:
+        return f"{_cut(names[0])} fails"
+    return "the tests fail"
+
+
 def continue_message(v: Verdict) -> str:
     """The note Hermes hands back to the agent instead of letting it finish."""
     lines = []
@@ -224,6 +335,14 @@ def continue_message(v: Verdict) -> str:
         lines.append(f"[{LABEL}] You cannot finish yet: the frozen acceptance contracts in {v.root} could not be checked.")
     for p in v.problems:
         lines.append(f"- {p}.")
+    needs = []
+    for r in v.failing():
+        for name, error in failing_tests(r.output_tail):
+            needs.append(f"- Failing requirement: {humanize(name)} ({name})" + (f": {error.rstrip('.')}" if error else "") + ".")
+    if needs:
+        lines += needs[:12]
+        lines.append("Each failing test is a requirement the person wrote down and locked. Change the code under test "
+                     "until it passes; do not argue that a locked test is wrong.")
     for r in v.failing():
         lines.append(_describe(r))
     lines.append(
@@ -235,21 +354,24 @@ def continue_message(v: Verdict) -> str:
 
 
 def sent_back_line(refusals) -> str:
-    """'Sent back once: C1 failed after Hermes said done.' or 'Sent back 2 times: C1 failed, then C1 again.'
-    Each refusal is the list of contract ids that failed then (empty when the check could not run)."""
-    refusals = [list(r or []) for r in refusals or []]
+    """'Sent back once: test_x failed after Hermes said done.', 'Sent back 3 times: test_x still failed.' or
+    'Sent back 2 times: 2 of 4 tests failed, then test_x still failed.' Each refusal is describe_failures()'s text."""
+    refusals = [r if isinstance(r, str) else ("the check" if not r else " and ".join(r)) for r in refusals or []]
     if not refusals:
         return ""
-    def name(ids):
-        if not ids:
-            return "the check"
-        return ids[0] if len(ids) == 1 else ", ".join(ids[:-1]) + " and " + ids[-1]
-    if len(refusals) == 1:
-        return f"Sent back once: {name(refusals[0])} failed after Hermes said done."
-    parts = [f"{name(refusals[0])} failed"]
-    for before, now in zip(refusals, refusals[1:]):
-        parts.append(f"then {name(now)}{' again' if now == before else ''}")
-    return f"Sent back {len(refusals)} times: {', '.join(parts)}."
+    n = len(refusals)
+    if n == 1:
+        return f"Sent back once: {refusals[0]} failed after Hermes said done."
+    runs = [d for i, d in enumerate(refusals) if i == 0 or d != refusals[i - 1]]
+    if len(runs) == 1:
+        return f"Sent back {n} times: {runs[0]} still failed."
+    line = f"Sent back {n} times: {runs[0]} failed, " + ", ".join(f"then {d} still failed" for d in runs[1:]) + "."
+    if len(line) > 120 and len(runs) > 2:
+        line = f"Sent back {n} times: {runs[0]} failed, \u2026, then {runs[-1]} still failed."
+    if len(line) > 120:
+        first, last = _cut(runs[0], 30), _cut(runs[-1], 30)
+        line = f"Sent back {n} times: {first} failed, " + ("\u2026, " if len(runs) > 2 else "") + f"then {last} still failed."
+    return line
 
 
 def stamp(v: Verdict, text: str, sent_back=()) -> str:
@@ -260,11 +382,20 @@ def stamp(v: Verdict, text: str, sent_back=()) -> str:
     lead = f"{line} " if line else ""
     if v.ok:
         rel = os.path.relpath(v.receipt_path, v.root) if v.receipt_path else ".necro/receipts"
-        passed = ("the frozen acceptance contract passes" if len(v.results) == 1
-                  else f"all {len(v.results)} frozen acceptance contracts pass")
+        if len(v.results) == 1:
+            counts = _counts(v.results)
+            passed = ("the locked tests pass" if not counts or not counts[1] else
+                      "the test passes" if counts[1] == 1 else f"all {counts[1]} tests pass")
+        else:
+            passed = f"all {len(v.results)} frozen acceptance contracts pass"
         return (f"{text.rstrip()}\n\n{lead}{LABEL}: {passed}. "
                 f"Receipt {v.receipt_hash[:12]}; anyone can re-check it with `hermes necro verify {rel}`.")
     fails = v.failing()
+    if fails and len(v.results) == 1:
+        head = f"Not done. {lead}{LABEL}: {_one_contract_result(v)}, so no receipt was written."
+        if v.problems:
+            head += " Also: " + "; ".join(v.problems) + "."
+        return f"{head}\n\n{text}"
     if fails:
         parts = "; ".join(f"{r.id} {WORD.get(r.status, r.status)}" + (f" ({r.says})" if r.says else "") for r in fails)
         n, total = len(fails), len(v.results)

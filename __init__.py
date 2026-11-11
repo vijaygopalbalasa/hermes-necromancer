@@ -52,7 +52,7 @@ class NecroPlugin:
         self.ctx = ctx
         self.cache: dict = {}
         self.turns: dict = {}   # session id -> project folders the gate checked this turn
-        self.sent_back: dict = {}  # session id -> this turn's refusals (failing contract ids), for the stamp
+        self.sent_back: dict = {}  # session id -> this turn's refusals (what failed, in words), for the stamp
         self.seen: dict = {}    # project folder -> digest at its last check
         self.session_env_ok = False  # set by register() when the agent-shell marker could be registered
         self._mutex = threading.Lock()
@@ -169,7 +169,7 @@ class NecroPlugin:
         try:
             orphans = self._orphans(changed_paths)
             if orphans:
-                self._sent(session_id, [])
+                self._sent(session_id, "the check")
                 return {"action": "continue", "message": f"[Contract Necromancer] You cannot finish yet: "
                         f"{self._orphan_problem(orphans)}."}
             roots = self._roots(changed_paths)
@@ -181,13 +181,13 @@ class NecroPlugin:
                 if not v.ok:
                     logger.info("contract-necromancer: refused done in %s (attempt %s): %s", root, attempt,
                                 v.failing_ids() or v.problems)
-                    self._sent(session_id, v.failing_ids())
+                    self._sent(session_id, gate.describe_failures(v))
                     return {"action": "continue", "message": gate.continue_message(v)}
                 logger.info("contract-necromancer: %s passes, receipt %s", root, v.receipt_hash)
             return None
         except Exception as exc:  # a broken gate must not let a frozen project slip through silently
             logger.exception("contract-necromancer: pre_verify failed")
-            self._sent(session_id, [])
+            self._sent(session_id, "the check")
             return {"action": "continue", "message": f"[Contract Necromancer] The frozen contracts could not be "
                     f"checked ({type(exc).__name__}: {exc}). Run necro_check, fix what it reports, then finish."}
 
@@ -258,7 +258,7 @@ class NecroPlugin:
         """Record one refusal this turn, so the final reply can say Hermes was sent back."""
         if not session_id:
             return
-        self.sent_back.setdefault(session_id, []).append(list(ids))
+        self.sent_back.setdefault(session_id, []).append(ids)
         while len(self.sent_back) > MAX_TURNS_TRACKED:
             self.sent_back.pop(next(iter(self.sent_back)))
 

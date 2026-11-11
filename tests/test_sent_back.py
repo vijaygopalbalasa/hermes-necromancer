@@ -26,8 +26,8 @@ class SentBack(unittest.TestCase):
             p.write("tipsplit.py", FIXED)
             self.assertIsNone(fire(ctx, p, attempt=1))
             out = transform(ctx, "Fixed.")
-            self.assertIn("Fixed.\n\nSent back once: C2 failed after Hermes said done. Contract Necromancer: all 3 "
-                          "frozen acceptance contracts pass. Receipt", out)
+            self.assertIn("Fixed.\n\nSent back once: test_no_share_differs_by_more_than_a_cent failed after Hermes said done. "
+                          "Contract Necromancer: all 3 frozen acceptance contracts pass. Receipt", out)
 
     def test_two_refusals_then_a_pass(self):
         with Project(code=HALF_FIX) as p:
@@ -37,7 +37,7 @@ class SentBack(unittest.TestCase):
             fire(ctx, p, attempt=1)
             p.write("tipsplit.py", FIXED)
             fire(ctx, p, attempt=2)
-            self.assertIn("Sent back 2 times: C2 failed, then C2 again. Contract Necromancer: all 3",
+            self.assertIn("Sent back 2 times: test_no_share_differs_by_more_than_a_cent still failed. Contract Necromancer: all 3",
                           transform(ctx, "Fixed."))
 
     def test_a_refusal_then_out_of_nudges_is_not_done(self):
@@ -46,8 +46,8 @@ class SentBack(unittest.TestCase):
             ctx.commands["necro"]("freeze")
             fire(ctx, p)
             out = transform(ctx, "The fix is complete.")
-            self.assertTrue(out.startswith("Not done. Sent back once: C2 failed after Hermes said done. Contract "
-                                           "Necromancer: 1 of 3"), out)
+            self.assertTrue(out.startswith("Not done. Sent back once: test_no_share_differs_by_more_than_a_cent failed after Hermes said "
+                                           "done. Contract Necromancer: 1 of 3"), out)
 
     def test_different_failures_are_named_in_order(self):
         with Project(code=BUGGY) as p:
@@ -58,7 +58,8 @@ class SentBack(unittest.TestCase):
             fire(ctx, p, attempt=1)
             p.write("tipsplit.py", FIXED)
             fire(ctx, p, attempt=2)
-            self.assertIn("Sent back 2 times: C1 failed, then C2.", transform(ctx, "Fixed."))
+            self.assertIn("Sent back 2 times: test_shares_add_up_to_the_total failed, then test_no_share_differs_by_more_than_a_cent still "
+                          "failed.", transform(ctx, "Fixed."))
 
     def test_a_new_turn_starts_clean(self):
         with Project(code=HALF_FIX) as p:
