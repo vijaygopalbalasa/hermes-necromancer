@@ -317,6 +317,23 @@ def _evasion(text: str) -> bool:
     return bool(EVASION.search(text)) or any(m.group(1).rstrip().endswith("&") for m in SUBSHELL.finditer(text))
 
 
+CALL_OR_CLOSE = r"(?P<call>(?:os\.(?:rename|replace)|shutil\.\w+)\()|(?P<close>\))"
+
+
+def _inside_call(low_text: str, q: str) -> bool:
+    """True when the quoted path comes after shutil.<name>(, os.rename( or os.replace( with no ")" in between, so
+    shutil.copy(x, Path('<path>')) counts. One left-to-right pass, so a long text cannot make a regex backtrack."""
+    open_call = False
+    for m in re.finditer(CALL_OR_CLOSE + "|(?P<path>" + q + ")", low_text):
+        if m.group("call"):
+            open_call = True
+        elif m.group("close"):
+            open_call = False
+        elif open_call:
+            return True
+    return False
+
+
 def _code_writes(low_text: str, spellings: set) -> bool:
     """True when code (Python or JavaScript) writes, deletes or moves one of these exact paths."""
     for s in spellings:
@@ -325,10 +342,9 @@ def _code_writes(low_text: str, spellings: set) -> bool:
             r"open\(\s*" + q + r"\s*,\s*(?:mode\s*=\s*)?['\"][^'\"]*[wax+]",
             r"path\(\s*" + q + r"\s*\)\s*\.\s*(?:write_text|write_bytes|unlink|rename|replace|touch|chmod|open\(\s*['\"][^'\"]*[wax+])",
             r"os\.(?:remove|unlink|rename|replace|truncate|chmod)\(\s*" + q,
-            r"(?:os\.(?:rename|replace)|shutil\.\w+)\([^()]*" + q,
             r"fs(?:\.promises)?\.\w{0,64}?(?:write|unlink|rm|rename|truncate|append|copy)\w{0,64}\(\s*" + q,
         )
-        if any(re.search(p, low_text) for p in patterns):
+        if any(re.search(p, low_text) for p in patterns) or _inside_call(low_text, q):
             return True
     return False
 

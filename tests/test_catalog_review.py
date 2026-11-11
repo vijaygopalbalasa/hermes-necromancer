@@ -147,6 +147,16 @@ class TheFasterGuardStillBlocks(unittest.TestCase):
     def test_a_plain_subshell_next_to_necro_is_allowed(self):
         self.assertIsNone(self.check("terminal", {"command": "necro status; (cd docs && ls)"}))
 
+    def test_a_frozen_path_wrapped_in_a_call_inside_shutil_or_os(self):
+        for cmd in ("python3 -c \"import shutil; from pathlib import Path; shutil.copy('x.py', Path('contracts/test_fair.py'))\"",
+                    "python3 -c \"import shutil; shutil.move('x.py', str('contracts/test_fair.py'))\"",
+                    "python3 -c \"import os; os.replace('x.py', ('contracts/test_fair.py'))\""):
+            self.assertIsNotNone(self.check("terminal", {"command": cmd}), cmd)
+
+    def test_reading_a_frozen_file_after_an_unrelated_shutil_call_is_allowed(self):
+        cmd = "python3 -c \"import shutil; shutil.which('python3'); print(open('contracts/test_fair.py').read())\""
+        self.assertIsNone(self.check("terminal", {"command": cmd}))
+
     def test_shutil_and_fs_writes_to_a_frozen_file(self):
         for cmd in ("python3 -c \"import shutil; shutil.copy('x.py', 'contracts/test_fair.py')\"",
                     "node -e \"const fs = require('fs'); fs.writeFileSync('contracts/test_fair.py', '')\"",
