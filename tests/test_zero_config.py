@@ -588,6 +588,33 @@ class Describe(unittest.TestCase):
         self.assertEqual(detect.describe(["a", "b", "c", "d"], 4), "4 test files (4 files)")
 
 
+class StatusAfterAFreeze(unittest.TestCase):
+    """Stranger test, Nov 11: status after a freeze speaks the freeze's words, not contracts, ids or UTC stamps."""
+
+    def test_one_contract_in_plain_words_with_the_lock_id_last(self):
+        with unittest_project() as f:
+            approvals = commands.Approvals(FakeState())
+            run(f, "freeze", approvals)
+            text, code = run(f, "status", approvals)
+            self.assertEqual(code, 0)
+            first, last = text.splitlines()[0], text.splitlines()[-1]
+            self.assertRegex(first, r"^Locked since \d\d:\d\d \(local time\): `python3 -m unittest discover -q -s tests` "
+                                    r"must pass\. Locked files: tests/test_calc\.py\. No passing run yet; a pass ends "
+                                    r"Hermes's reply with a receipt\.$")
+            self.assertRegex(last, r"^Lock [0-9a-f]{12}\.$")
+            for jargon in ("C1", "contract", "approved here", "Z)", "frozen "):
+                self.assertNotIn(jargon, text)
+
+    def test_pinned_settings_are_named(self):
+        with Folder({"package.json": json.dumps({"scripts": {"test": "jest"}}), "src/a.test.js": ""}) as f:
+            approvals = commands.Approvals(FakeState())
+            with mock.patch.object(detect, "runner_problem", no_runner_problem), \
+                    mock.patch.object(commands, "right_now", not_run):
+                run(f, "freeze", approvals)
+            text, _ = run(f, "status", approvals)
+            self.assertIn("Settings: package.json scripts.test and 5 more.", text)
+
+
 class GeneratedToml(unittest.TestCase):
     def test_it_round_trips_quotes_and_backslashes_and_keeps_outputs_at_the_top(self):
         run_cmd = 'python3 -c "import sys; sys.exit(0)" C:\\x'

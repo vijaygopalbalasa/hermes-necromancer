@@ -180,23 +180,59 @@ def status(cwd, approvals: Approvals) -> tuple:
     try:
         lk = read_lock(root)
     except LockError as exc:
-        return f"{root}: {exc}", 1
+        return f"{root.name}: {exc}", 1
     digest = lock_hash(lk)
     record = (approvals.mapping() or {}).get(str(root)) if approvals.store is not None else digest
-    if record == APPROVAL_TAMPERED:
-        approved = "no: its approval record was changed outside necro (run /necro freeze again)"
+    contracts = lk["contracts"]
+    files = sorted({f["path"] for c in contracts for f in c["files"]})
+    shown = ", ".join(files[:6]) + (f" and {len(files) - 6} more" if len(files) > 6 else "")
+    by_file = {}
+    for c in contracts:
+        for pin in c.get("pins") or []:
+            file, _, field = pin["pin"].partition("#")
+            if field:
+                by_file.setdefault(file, []).append(field)
+    settings = "; ".join(f"{file} {fields[0]}" + (f" and {len(fields) - 1} more" if len(fields) > 1 else "")
+                         for file, fields in by_file.items())
+    since = _local_time(lk.get("frozenAt"))
+    if len(contracts) == 1:
+        lines = [f"Locked since {since} (local time): `{contracts[0]['run']}` must pass. Locked files: {shown}."]
     else:
-        approved = "yes" if record == digest else "no (run /necro approve after reading it)"
-    lines = [f"Frozen contracts in {root} (lock {digest[:12]}, frozen {lk.get('frozenAt', '?')}, approved here: {approved}):"]
-    lines += _contract_lines(lk)
+        lines = [f"Locked since {since} (local time): {len(contracts)} checks must pass."]
+        lines += [f"  {c['id']}: {c.get('says') or c['run']} (`{c['run']}`)" for c in contracts]
+        lines.append(f"Locked files: {shown}.")
+    if settings:
+        lines[-1] += f" Settings: {settings}."
     d = drift(root, lk)
-    for reason in d.spec:
-        lines.append(f"  ! {reason}")
-    for cid, reasons in d.contracts.items():
-        lines.append(f"  ! {cid}: {'; '.join(reasons)}")
+    if d.any():
+        lines.append("Changed since the lock: " + ", ".join(d.paths() or ["necro.toml"]) + ". That counts as not done "
+                     "until it is put back, or a person types /necro freeze again.")
+    if record == APPROVAL_TAMPERED:
+        lines.append("Its approval record was changed outside necro, so it counts as not done; type /necro freeze again.")
+    elif record != digest:
+        lines.append("Not approved here yet: read necro.toml, then type /necro approve.")
     latest = list_receipts(root)
-    lines.append(f"Latest receipt: {os.path.relpath(latest[0], root)}" if latest else "No receipt yet.")
+    if latest:
+        try:
+            rc = json.loads(latest[0].read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            rc = {}
+        lines[-1] += (f" Last pass: receipt {str(rc.get('receiptHash', '?'))[:12]}, at {_local_time(rc.get('createdAt'))}; "
+                      "anyone can re-check it with /necro verify.")
+    else:
+        lines[-1] += " No passing run yet; a pass ends Hermes's reply with a receipt."
+    lines.append(f"Lock {digest[:12]}.")
     return "\n".join(lines), 0
+
+
+def _local_time(stamp) -> str:
+    """'17:56' today, '10 Nov 17:56' another day, in local time, from the UTC time a lock or receipt records."""
+    from datetime import datetime
+    try:
+        when = datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).astimezone()
+    except ValueError:
+        return "an unknown time"
+    return when.strftime("%H:%M") if when.date() == datetime.now().astimezone().date() else when.strftime("%d %b %H:%M")
 
 
 TOML_EXAMPLE = """    [[contract]]

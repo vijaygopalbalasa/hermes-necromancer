@@ -441,8 +441,8 @@ def _one(root: Path, words: list, sh: Shape, have: set, top: bool, depth: int, s
     if prog in PACKAGE_MANAGERS:
         names = _script_names(prog, args)
         if names:
-            _node(root, sh, have)
             _scripts(root, names, sh, have, depth, seen)
+            _node(root, sh, have)
     if prog in NODE_TOOLS or (prog in ("pnpm", "yarn") and args[:1] in (["exec"], ["dlx"])):
         _node(root, sh, have)
     if prog in ("pytest", "py.test") or (prog.startswith("python") and args[:2] == ["-m", "pytest"]):
