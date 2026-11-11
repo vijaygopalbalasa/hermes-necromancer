@@ -8,7 +8,7 @@ Why a plugin and not a prompt: a prompt or a skill can only ask Hermes to run th
 misread them or edit them. This runs your tests itself at Hermes's verify step, outside the model, and blocks writes
 to the locked files before they land.
 
-![In a real run Hermes said "The fix is complete" while frozen test C4 still failed; the plugin refused that done](docs/img/not-done.png)
+![A real Hermes 0.23.1 session on a local model: Hermes said "Fixed." while a locked test still failed; the plugin sent it back once, and the final reply names the test and ends with a receipt](docs/img/real-run.png)
 
 ## Quick start
 
