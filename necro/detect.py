@@ -581,46 +581,46 @@ def remove_if_same(path: Path, text: str) -> None:
         pass
 
 
-_PYTEST_SUMMARY = re.compile(r"^=*\s*((?:\d+ (?:failed|passed|errors?|skipped|xfailed|xpassed|deselected|warnings?)"
-                             r"(?:, )?)+) in [\d.]+s", re.MULTILINE)
-_PYTEST_PART = re.compile(r"(\d+) (failed|passed|errors?)")
-_UNITTEST_RAN = re.compile(r"^Ran (\d+) tests? in", re.MULTILINE)
-_UNITTEST_FAILED = re.compile(r"^FAILED \(([^)]*)\)", re.MULTILINE)
-_JEST = re.compile(r"^Tests:\s+(.*?)(\d+) total", re.MULTILINE)
-_VITEST = re.compile(r"^\s*Tests\s+(?:(\d+) failed\s*\|\s*)?(?:(\d+) passed)?.*?\((\d+)\)", re.MULTILINE)
-_NODE = re.compile(r"^[#\u2139] (tests|fail) (\d+)$", re.MULTILINE)  # TAP (#) and spec (\u2139) reporters
-_CARGO = re.compile(r"^test result: \w+\. (\d+) passed; (\d+) failed;", re.MULTILINE)
+# Linear, line-by-line patterns only: test output can carry anything the code under test prints.
+_COUNT = re.compile(r"(\d+) (failed|passed|errors?|total)\b")
+_PYTEST_TIME = re.compile(r" in [\d.]+s\b")
+_UNITTEST_RAN = re.compile(r"^Ran (\d+) tests? in")
+_UNITTEST_KIND = re.compile(r"(failures|errors)=(\d+)")
+_NODE = re.compile(r"^[#\u2139] (tests|fail) (\d+)$")  # TAP (#) and spec (\u2139) reporters
+_CARGO = re.compile(r"^test result: \w+\. (\d+) passed; (\d+) failed;")
 
 
 def test_counts(output: str):
     """(failing, total) from the end of a test run's output (pytest, unittest, jest, vitest, node --test or
-    cargo), or None when it cannot tell."""
-    text = output or ""
-    m = list(_PYTEST_SUMMARY.finditer(text))
-    if m:
-        parts = {kind.rstrip("s") if kind.startswith("error") else kind: int(n)
-                 for n, kind in _PYTEST_PART.findall(m[-1].group(1))}
-        failing = parts.get("failed", 0) + parts.get("error", 0)
-        return failing, failing + parts.get("passed", 0)
-    ran = _UNITTEST_RAN.findall(text)
+    cargo), or None when it cannot tell. Reads line by line with linear patterns."""
+    lines = (output or "").splitlines()
+    for line in reversed(lines):  # pytest: "1 failed, 3 passed in 0.12s"
+        if _PYTEST_TIME.search(line) and not line.lstrip().startswith(("Ran ", "Tests")):
+            parts = {}
+            for n, kind in _COUNT.findall(line):
+                parts["error" if kind.startswith("error") else kind] = int(n)
+            if parts:
+                failing = parts.get("failed", 0) + parts.get("error", 0)
+                return failing, failing + parts.get("passed", 0)
+    ran = [m for m in (_UNITTEST_RAN.match(line) for line in lines) if m]
     if ran:
-        total = int(ran[-1])
-        failed = _UNITTEST_FAILED.findall(text)
-        failing = sum(int(n) for kind, n in re.findall(r"(failures|errors)=(\d+)", failed[-1])) if failed else 0
-        return failing, total
-    jest = _JEST.findall(text)
-    if jest:
-        head, total = jest[-1]
-        failed = re.search(r"(\d+) failed", head)
-        return (int(failed.group(1)) if failed else 0), int(total)
-    vitest = _VITEST.findall(text)
-    if vitest:
-        failed, _passed, total = vitest[-1]
-        return int(failed or 0), int(total)
-    node = dict(_NODE.findall(text))
+        failed = [line for line in lines if line.startswith("FAILED (")]
+        failing = sum(int(n) for _, n in _UNITTEST_KIND.findall(failed[-1])) if failed else 0
+        return failing, int(ran[-1].group(1))
+    for line in reversed(lines):
+        text = line.strip()
+        if text.startswith("Tests:") and "total" in text:  # jest: "Tests:  2 failed, 2 passed, 4 total"
+            parts = {kind: int(n) for n, kind in _COUNT.findall(text)}
+            return parts.get("failed", 0), parts.get("total", 0)
+        if text.startswith("Tests ") and text.endswith(")") and "(" in text:  # vitest: "Tests  2 failed | 2 passed (4)"
+            parts = {kind: int(n) for n, kind in _COUNT.findall(text)}
+            total = text.rsplit("(", 1)[1][:-1]
+            if total.isdigit():
+                return parts.get("failed", 0), int(total)
+    node = dict(m.groups() for m in (_NODE.match(line) for line in lines) if m)
     if "tests" in node:
         return int(node.get("fail", 0)), int(node["tests"])
-    cargo = _CARGO.findall(text)
+    cargo = [m.groups() for m in (_CARGO.match(line) for line in lines) if m]
     if cargo:
         passed, failed = sum(int(p) for p, _ in cargo), sum(int(f) for _, f in cargo)
         return failed, passed + failed

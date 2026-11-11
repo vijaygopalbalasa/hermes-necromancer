@@ -232,6 +232,16 @@ class RunAtFreeze(unittest.TestCase):
         for text, want in samples.items():
             self.assertEqual(detect.test_counts(text), want, text)
 
+    def test_the_output_parsers_stay_fast_on_hostile_output(self):
+        # Test output can carry anything the code under test prints; the parsers read it line by line.
+        import time
+        hostile = "\n".join(["Tests: " + "1" * 20000, "1 failed" * 3000 + " in", "FAILED " + "a::" * 6000,
+                              "FAIL: " + "x" * 20000 + " (", "\u2716 " + "(" * 20000, "test " + ":" * 20000])
+        started = time.monotonic()
+        detect.test_counts(hostile)
+        gate.failing_tests(hostile)
+        self.assertLess(time.monotonic() - started, 2.0)
+
 
 
 class PinsAndTheCache(unittest.TestCase):
