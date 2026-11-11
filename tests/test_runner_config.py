@@ -445,5 +445,27 @@ class ContractsRunWithThePersonsPath(unittest.TestCase):
             self.assertEqual(runner.contract_env()["PATH"], os.environ["PATH"])
 
 
+
+class TheNamedVenvIsPinned(unittest.TestCase):
+    """Security review, Nov 11: a contract that runs .venv/bin/python pins .venv/pyvenv.cfg by hash and the
+    interpreter link's own text, so swapping the interpreter counts as tampering (packages are another matter)."""
+
+    def test_pyvenv_cfg_and_the_interpreter_link_are_pinned(self):
+        with Folder({"tests/test_a.py": UNITTEST_TEST, "calc.py": CALC_FIXED, ".venv/pyvenv.cfg": "home = /usr/bin\n"}) as f:
+            os.makedirs(f.path(".venv/bin"))
+            os.symlink(sys.executable, f.path(".venv/bin/python"))
+            approvals = commands.Approvals(FakeState())
+            with mock.patch.object(detect, "runner_problem", no_runner_problem), \
+                    mock.patch.object(commands, "right_now", not_run):
+                text, code = run(f, "freeze .venv/bin/python -m unittest discover -q -s tests", approvals)
+            self.assertEqual(code, 0, text)
+            pins = [p["pin"] for p in lock.read_lock(f.dir)["contracts"][0]["pins"]]
+            self.assertIn(".venv/pyvenv.cfg", pins)
+            self.assertIn(".venv/bin/python", pins)
+            self.assertTrue(verdict(f, approvals).ok)
+            f.write(".venv/pyvenv.cfg", "home = /elsewhere\n")
+            self.assertIn("changed since freeze: .venv/pyvenv.cfg", reasons(verdict(f, approvals)))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -444,7 +444,11 @@ def _one(root: Path, words: list, sh: Shape, have: set, top: bool, depth: int, s
         rel = _rel(root, exe)
         hidden = _hidden_in(rel) if rel else None
         if hidden and rel in VENV_PYTHONS and project_python(root):
-            sh.venv = hidden  # the person named their virtualenv's Python: it runs, and .venv stays unlocked
+            # The person named their virtualenv's Python: it runs, its folder stays unlocked, but its pyvenv.cfg and
+            # the interpreter link's own text are pinned, so swapping the interpreter counts as tampering.
+            sh.venv = hidden
+            sh.add("pins", f"{hidden}/pyvenv.cfg")
+            sh.add("pins", rel)
         elif hidden:
             rest = " ".join(args)
             venv = project_python(root)

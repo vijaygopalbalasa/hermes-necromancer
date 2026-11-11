@@ -173,7 +173,8 @@ Under `plugins.entries.contract-necromancer.settings`: `gate_budget_seconds` (25
 - **Runner files.** For your own command, a runner's file (a Makefile, `tox.ini`, `noxfile.py`, a justfile, a
   Taskfile) is locked when it exists at freeze; files it includes or calls are not, unless the command names them.
 - **The Python your tests run with** (from your PATH, or a `.venv` you name in `/necro freeze .venv/bin/python -m
-  pytest -q`) is not locked: packages installed into it can change what the tests do.
+  pytest -q`) is not locked beyond a named `.venv`'s `pyvenv.cfg` and interpreter link, which are pinned: packages
+  installed into it can change what the tests do.
 - **Slow or huge.** Contracts slower than the gate's budget are reported as not checked (the agent is told to run
   `necro_check`, which has 10 minutes). A folder with more than 20,000 files is locked in part: list the folders
   that matter in `necro.toml` (`sources = ["src/**", "tests/**"]`) and type `/necro freeze`.
@@ -198,7 +199,7 @@ network calls, no telemetry, no credentials stored, no background processes.
 ## Tests
 
 ```
-python3 -m unittest discover -s tests                        # 382 tests, about 90 s
+python3 -m unittest discover -s tests                        # 383 tests, about 90 s
 python3 tests/e2e/run_in_hermes.py --hermes $(which hermes)    # the real Hermes agent loop
 ```
 
