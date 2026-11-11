@@ -68,10 +68,11 @@ test file that uses it), unittest, `npm test` (when `package.json` has a real te
 `cargo test`. It writes `necro.toml` with one contract, C1, locks it, runs it once and says what it locked:
 
 ```
-Locked your tests: `python3 -m pytest -q` must pass. Frozen: tests/** (12 files), and pytest's settings. Hermes
-can't say "done" until this passes, and it can't edit these files. Undo: /necro unfreeze. Change what counts as
-done: edit necro.toml, then /necro freeze.
-Right now: 2 of 12 tests fail. Hermes can't say done until they pass.
+Locked your tests: `python3 -m pytest -q` must pass. Locked files: tests/ (12 files) and pytest's settings (other
+edits there, like dependencies, are fine). Hermes's "done" won't count until this passes, and edits to these files
+are blocked. Saved in necro.toml; to change what counts as done, edit it and type /necro freeze again. Undo:
+/necro unfreeze.
+Right now: 2 of 12 tests fail.
 ```
 
 It also locks the settings that shape the run, by field: the test script in `package.json` and the scripts it runs,
@@ -163,8 +164,12 @@ Under `plugins.entries.contract-necromancer.settings`: `gate_budget_seconds` (25
   `Cargo.toml` are not pinned. Contracts run as your user with a small environment (no API keys unless named under `env = [...]`).
 - **Runner files.** For your own command, a runner's file (a Makefile, `tox.ini`, `noxfile.py`, a justfile, a
   Taskfile) is locked when it exists at freeze; files it includes or calls are not, unless the command names them.
+- **Virtualenvs.** Inside Hermes, `python3` is Hermes's own Python, which has no pytest. If your tests need your
+  project's virtualenv, type `/necro freeze .venv/bin/python -m pytest -q`: the plugin runs that interpreter, but
+  `.venv` itself is not locked.
 - **Slow or huge.** Contracts slower than the gate's budget are reported as not checked (the agent is told to run
-  `necro_check`, which has 10 minutes); in a very large project, list the files that matter under `sources`.
+  `necro_check`, which has 10 minutes). A folder with more than 20,000 files is locked in part: list the folders
+  that matter in `necro.toml` (`sources = ["src/**", "tests/**"]`) and type `/necro freeze`.
 - **Tested** on macOS with Hermes 0.23.1 and 0.22.7 and Python 3.11, 3.14 and 3.15. Linux and Windows are untested here; the
   CI workflow runs the unit tests and the demo on Ubuntu and macOS on every push. The exact rules for credential
   files, links and `verify` are in [docs/security.md](docs/security.md).

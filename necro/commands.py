@@ -168,6 +168,9 @@ def status(cwd, approvals: Approvals) -> tuple:
     root = find_root(cwd)
     if root is None:
         draft = spec_root(cwd)
+        if draft and _sources_only(draft):
+            return (f"Nothing is locked in {draft.name} yet. necro.toml lists the folders that count; type /necro freeze "
+                    "to find the tests in them and lock them."), 0
         if draft and (draft / SPEC_NAME).is_file():
             try:
                 sp = load_spec(draft)
@@ -325,16 +328,34 @@ def right_now(root: Path, approvals: Approvals, cache=None, budget_s: float = FR
     return "Right now: the tests fail."
 
 
+def _sources_only(root: Path):
+    """(text, sources) when necro.toml lists only which folders count (sources = [...]) and no contract yet."""
+    import tomllib
+    path = root / SPEC_NAME
+    if os.path.islink(path) or not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+        data = tomllib.loads(text)
+    except (OSError, ValueError):
+        return None
+    sources = data.get("sources")
+    if "contract" in data or not isinstance(sources, list) or not sources or not all(isinstance(x, str) for x in sources):
+        return None
+    return text, sources, "outputs" in data
+
+
 def _freeze_found(root: Path, approvals: Approvals, command: str | None, cache=None,
-                  run_budget_s: float = FREEZE_RUN_BUDGET) -> tuple:
-    """/necro freeze where there is no necro.toml: find the tests and their command (or use the person's),
-    write necro.toml, freeze it, run it once. All or nothing: when it cannot lock, it changes nothing."""
-    if os.path.lexists(root / SPEC_NAME):
+                  run_budget_s: float = FREEZE_RUN_BUDGET, partial=None) -> tuple:
+    """/necro freeze where there is no necro.toml (or one that lists only sources = [...]): find the tests and
+    their command (or use the person's), write the contract, freeze it, run it once. All or nothing: when it
+    cannot lock, it changes nothing."""
+    if partial is None and os.path.lexists(root / SPEC_NAME):
         return (f"Could not freeze: {root / SPEC_NAME} is a link, and Contract Necromancer never follows links. Put "
                 f"a regular {SPEC_NAME} there, or remove the link and type /necro freeze again."), 1
-    found = detect.detect(root)
+    found = detect.detect(root, sources=partial[1] if partial else None)
     if found.problem:
-        return f"Nothing locked: {found.problem}", 1
+        return f"Nothing locked: {found.problem[0].lower()}{found.problem[1:]}", 1
     if command:
         try:
             run = detect.as_run(command)
@@ -360,17 +381,31 @@ def _freeze_found(root: Path, approvals: Approvals, command: str | None, cache=N
     problem = detect.runner_problem(run, root)
     if problem:
         return f"Nothing locked: {runner_advice(root, run, problem)}", 1
-    text = detect.toml_text(run, patterns, found.outputs, shaped.pins)
     path = root / SPEC_NAME
-    try:
-        if not detect.write_new(path, text):
-            return f"Nothing locked: {SPEC_NAME} appeared in {root} meanwhile. Read it, then type /necro freeze.", 1
-    except OSError as exc:
-        return f"Nothing locked: could not write {path} ({exc.strerror or exc}).", 1
+    if partial:
+        before, _, has_outputs = partial
+        text = before.rstrip("\n") + "\n\n" + detect.toml_text(run, patterns, () if has_outputs else found.outputs,
+                                                                shaped.pins)
+        try:
+            tmp = path.with_name(f".{SPEC_NAME}.tmp")
+            tmp.write_text(text, encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError as exc:
+            return f"Nothing locked: could not write {path} ({exc.strerror or exc}).", 1
+    else:
+        text = detect.toml_text(run, patterns, found.outputs, shaped.pins)
+        try:
+            if not detect.write_new(path, text):
+                return f"Nothing locked: {SPEC_NAME} appeared in {root.name} meanwhile. Read it, then type /necro freeze.", 1
+        except OSError as exc:
+            return f"Nothing locked: could not write {path} ({exc.strerror or exc}).", 1
     try:
         lk = freeze(root)
     except (SpecError, OSError) as exc:
-        detect.remove_if_same(path, text)
+        if partial:
+            path.write_text(partial[0], encoding="utf-8")
+        else:
+            detect.remove_if_same(path, text)
         return f"Could not freeze: {exc}", 1
     approvals.approve(root, lock_hash(lk))
     count = len({f["path"] for c in lk["contracts"] for f in c["files"]})
@@ -399,6 +434,9 @@ def do_freeze(cwd, approvals: Approvals, command: str | None = None, cache=None,
     if command:
         return (f"Nothing changed: {root / SPEC_NAME} already says what counts as done here. To use `{command}`, "
                 f"change run in {SPEC_NAME}, then type /necro freeze."), 1
+    partial = _sources_only(root)
+    if partial and find_root(root) is None:
+        return _freeze_found(root, approvals, None, cache, run_budget_s, partial)
     try:
         lk = freeze(root)
     except SpecError as exc:

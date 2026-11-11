@@ -241,7 +241,23 @@ class Detection(unittest.TestCase):
         with Folder({"tests/test_calc.py": UNITTEST_TEST, "a.py": "", "b.py": ""}) as f:
             with mock.patch.object(detect, "MAX_SOURCES", 2):
                 got = detect.detect(f.dir)
-            self.assertIn("too many", got.problem)
+            self.assertIn("This folder has 3 files, and I lock at most 2 as one project.", got.problem)
+
+    def test_too_many_files_names_the_real_count_and_a_sources_line_that_works(self):
+        with Folder({"src/a.py": "", "src/b.py": "", "tests/test_a.py": UNITTEST_TEST}) as f:
+            with mock.patch.object(detect, "MAX_SOURCES", 2):
+                text, code = run(f, "freeze")
+                self.assertNotEqual(code, 0)
+                self.assertEqual(text, "Nothing locked: this folder has 3 files, and I lock at most 2 as one project. To "
+                                       'lock part of it, list the folders that matter in necro.toml, e.g. sources = '
+                                       '["src/**", "tests/**"], then type /necro freeze.')
+                f.write("necro.toml", 'sources = ["tests/**"]\n')
+                self.assertIn("type /necro freeze to find the tests in them", run(f, "status")[0])
+                text, code = run(f, "freeze")
+            self.assertEqual(code, 0, text)
+            self.assertTrue(text.startswith("Locked your tests: `python3 -m unittest discover -q -s tests` must pass."))
+            self.assertTrue(f.read("necro.toml").startswith('sources = ["tests/**"]\n'))
+            self.assertEqual(lock.read_lock(f.dir)["sources"], ["tests/**"])
 
 
 class NeverOpened(unittest.TestCase):

@@ -205,8 +205,27 @@ def _runner(root: Path, files: list) -> tuple:
     return None, None
 
 
-def detect(root, budget_s: float = 60.0) -> Found:
-    """What /necro freeze would lock in ``root``. Reads only; see the module note."""
+def _too_many(files: list) -> str:
+    """The real count and a sources line built from the project's own top-level folders."""
+    from .spec import MAX_FILES, SKIP_DIRS
+    count = f"more than {MAX_FILES:,}" if len(files) > MAX_FILES else f"{len(files):,}"
+    tops = {}
+    for rel in files:
+        if "/" in rel:
+            top = rel.split("/", 1)[0]
+            tops[top] = tops.get(top, 0) + 1
+    tests = next((t for t in ("tests", "test", "spec") if t in tops), None)
+    others = sorted((n, t) for t, n in tops.items() if t != tests and not t.startswith(".") and t not in SKIP_DIRS)
+    picks = [others[-1][1]] if others else []
+    picks += [tests] if tests else []
+    example = ", ".join(json.dumps(t + "/**") for t in picks) or '"src/**", "tests/**"'
+    return (f"This folder has {count} files, and I lock at most {MAX_SOURCES:,} as one project. To lock part of it, "
+            f"list the folders that matter in necro.toml, e.g. sources = [{example}], then type /necro freeze.")
+
+
+def detect(root, budget_s: float = 60.0, sources=None) -> Found:
+    """What /necro freeze would lock in ``root``, only among the files ``sources`` names when it is given. Reads
+    only; see the module note."""
     root = Path(root).expanduser().resolve()
     found = Found(root)
     try:
@@ -225,8 +244,11 @@ def detect(root, budget_s: float = 60.0) -> Found:
         found.problem = ("This folder took too long to read. To lock part of it, list the folders that matter in "
                          'necro.toml, e.g. sources = ["src/**", "tests/**"], then type /necro freeze.')
         return found
+    if sources:
+        from .spec import matches
+        files = [rel for rel in files if any(matches(rel, pattern) for pattern in sources)]
     if len(files) > MAX_SOURCES:
-        found.problem = f"{root} has more than {MAX_SOURCES:,} files, too many to lock as one project"
+        found.problem = _too_many(files)
         return found
     found.listing = files
     found.patterns, found.files = freeze_patterns(root, files)
