@@ -6,6 +6,7 @@ import os
 import shlex
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -20,8 +21,35 @@ TAIL_CHARS = 2000
 PASS_ENV = (
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "LC_MESSAGES",
     "TZ", "TMPDIR", "TEMP", "TMP", "TERM", "SYSTEMROOT", "SYSTEMDRIVE", "COMSPEC", "PATHEXT", "WINDIR",
-    "VIRTUAL_ENV", "CONDA_PREFIX", "JAVA_HOME", "GOPATH", "GOROOT", "CARGO_HOME", "RUSTUP_HOME", "NVM_DIR",
-)
+    "CONDA_PREFIX", "JAVA_HOME", "GOPATH", "GOROOT", "CARGO_HOME", "RUSTUP_HOME", "NVM_DIR",
+)  # never VIRTUAL_ENV or PYTHONPATH: inside Hermes they describe Hermes's own Python
+SYSTEM_DIRS = {"/usr/bin", "/bin", "/usr/sbin", "/sbin", "/usr/local/bin", "/opt/homebrew/bin"}
+
+
+def _within(path: str, folder: str) -> bool:
+    return bool(folder) and (path == folder or path.startswith(folder.rstrip(os.sep) + os.sep))
+
+
+def contract_path(value: str) -> str:
+    """PATH as Hermes was started with it. Inside Hermes (hermes_cli is loaded), Hermes puts its own launcher folder
+    and its environment's bin first (pm/environments.py), so python3 there would be Hermes's Python: entries under
+    sys.prefix, the interpreter's own folder or the Hermes checkout are dropped, system folders never, the rest
+    keeps its order. Outside Hermes, PATH is left alone."""
+    module = sys.modules.get("hermes_cli")
+    if not value or module is None:
+        return value
+    runtime = [os.path.realpath(sys.prefix), os.path.realpath(os.path.dirname(sys.executable))]
+    try:
+        runtime.append(os.path.realpath(str(Path(module.__file__).resolve().parents[1])))
+    except (AttributeError, TypeError, IndexError, OSError):
+        pass
+    keep = []
+    for entry in value.split(os.pathsep):
+        real = os.path.realpath(entry) if entry else entry
+        if entry and real not in SYSTEM_DIRS and any(_within(real, folder) for folder in runtime):
+            continue
+        keep.append(entry)
+    return os.pathsep.join(keep)
 STATUSES = ("pass", "fail", "tampered", "timeout", "unfinished", "skipped", "error")
 
 
@@ -50,6 +78,8 @@ def all_pass(results) -> bool:
 
 def contract_env(names=()) -> dict:
     env = {k: os.environ[k] for k in PASS_ENV if k in os.environ}
+    if "PATH" in env:
+        env["PATH"] = contract_path(env["PATH"])
     for name in names:
         if name in os.environ:
             env[name] = os.environ[name]

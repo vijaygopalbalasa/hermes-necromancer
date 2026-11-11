@@ -4,6 +4,10 @@ Lock the tests that define done with one command. When Hermes says it's finished
 sends Hermes back with the failure named. Edits to locked tests are blocked, and a pass ends the reply with a receipt
 anyone can re-check.
 
+Why a plugin and not a prompt: a prompt or a skill can only ask Hermes to run the tests, and Hermes can skip them,
+misread them or edit them. This runs your tests itself at Hermes's verify step, outside the model, and blocks writes
+to the locked files before they land.
+
 ![In a real run Hermes said "The fix is complete" while frozen test C4 still failed; the plugin refused that done](docs/img/not-done.png)
 
 ## Quick start
@@ -14,7 +18,9 @@ anyone can re-check.
    hermes plugins install vijaygopalbalasa/hermes-necromancer --enable
    ```
 
-2. In your project, type **`/necro freeze`** in the Hermes chat. It finds your tests and locks them.
+2. In your project, type **`/necro freeze`** in the Hermes chat. It finds your tests and locks them. (If pytest
+   lives in your project's virtualenv, type `/necro freeze .venv/bin/python -m pytest -q`; in a repo over 20,000
+   files, first list the folders that matter in `necro.toml`, as `sources = ["src/**", "tests/**"]`.)
 3. Work as usual. Hermes isn't done until they pass; the reply says if it was sent back, and ends with a receipt.
 
 To watch the whole story first, with no API key: `hermes necro demo`.
@@ -131,8 +137,8 @@ Hermes: `python3 <plugin folder>/necro verify .necro/receipts/<hash>.json --run`
   within a time budget (25 s by default, under Hermes's 30 s hook limit) and returns `continue` with the failing
   contracts and the end of their output. Hermes caps this at `agent.max_verify_nudges` (3 by default).
 - **The stamp (`transform_llm_output`).** Hermes keeps the gate's note to the agent out of the chat, so the final
-  reply says what happened: `Sent back once: C1 failed after Hermes said done.`, then the receipt, or, if the agent
-  ran out of tries, it starts with `Not done.` It also checks a frozen project whenever its files changed, so shell
+  reply says what happened: `Sent back once: test_a_negative_total_is_refused failed after Hermes said done.`, then
+  the receipt, or, if the agent ran out of tries, it starts with `Not done.` It also checks a frozen project whenever its files changed, so shell
   edits are covered.
 - **The guard (`pre_tool_call`).** `write_file`, `patch`, `terminal` and `execute_code` calls that would write,
   delete or rename a frozen file, `necro.toml`, `.necro/` or the approval store are blocked with a reason.
@@ -143,6 +149,8 @@ Hermes: `python3 <plugin folder>/necro verify .necro/receipts/<hash>.json --run`
   each contract's result and every project file, and `/necro verify` answers `CONFIRMED`, `MISMATCH` (naming what
   changed), `SUPERSEDED` (frozen again since) or `HASHES MATCH` (files match, nothing re-run). Credential files are
   never opened and links never followed; the exact rules are in [docs/security.md](docs/security.md).
+- **Your PATH.** Contracts run with the PATH Hermes was started with, minus Hermes's own runtime (which Hermes puts
+  first), so `python3` is yours, not Hermes's.
 - **Tools.** `necro_status` and `necro_check` let the agent see and re-run the contracts (Hermes lists plugin tools
   behind `tool_search`).
 
@@ -164,9 +172,8 @@ Under `plugins.entries.contract-necromancer.settings`: `gate_budget_seconds` (25
   `Cargo.toml` are not pinned. Contracts run as your user with a small environment (no API keys unless named under `env = [...]`).
 - **Runner files.** For your own command, a runner's file (a Makefile, `tox.ini`, `noxfile.py`, a justfile, a
   Taskfile) is locked when it exists at freeze; files it includes or calls are not, unless the command names them.
-- **Virtualenvs.** Inside Hermes, `python3` is Hermes's own Python, which has no pytest. If your tests need your
-  project's virtualenv, type `/necro freeze .venv/bin/python -m pytest -q`: the plugin runs that interpreter, but
-  `.venv` itself is not locked.
+- **The Python your tests run with** (from your PATH, or a `.venv` you name in `/necro freeze .venv/bin/python -m
+  pytest -q`) is not locked: packages installed into it can change what the tests do.
 - **Slow or huge.** Contracts slower than the gate's budget are reported as not checked (the agent is told to run
   `necro_check`, which has 10 minutes). A folder with more than 20,000 files is locked in part: list the folders
   that matter in `necro.toml` (`sources = ["src/**", "tests/**"]`) and type `/necro freeze`.
@@ -191,7 +198,7 @@ network calls, no telemetry, no credentials stored, no background processes.
 ## Tests
 
 ```
-python3 -m unittest discover -s tests                        # 375 tests, about 90 s
+python3 -m unittest discover -s tests                        # 382 tests, about 90 s
 python3 tests/e2e/run_in_hermes.py --hermes $(which hermes)    # the real Hermes agent loop
 ```
 

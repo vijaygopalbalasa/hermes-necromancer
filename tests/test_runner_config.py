@@ -412,5 +412,38 @@ class NoWriteThroughALink(unittest.TestCase):
             self.assertEqual(fh.read(), "untouched\n")
 
 
+
+class ContractsRunWithThePersonsPath(unittest.TestCase):
+    """Inside Hermes, PATH starts with Hermes's own launcher folder and its environment's bin (pm/environments.py
+    in 0.23.1), so python3 there is Hermes's Python. Contracts run with the PATH Hermes was started with, minus
+    that runtime; VIRTUAL_ENV and PYTHONPATH never pass through."""
+
+    def test_hermes_runtime_entries_are_dropped_and_the_rest_keeps_its_order(self):
+        import tempfile
+        import types
+        from necro import runner
+        top = tempfile.mkdtemp(prefix="necro-fake-hermes-")
+        checkout, env = os.path.join(top, "checkout"), os.path.join(top, "env")
+        for d in (os.path.join(checkout, "hermes_cli"), os.path.join(checkout, ".hermes", "bin"), os.path.join(env, "bin")):
+            os.makedirs(d)
+        fake = types.ModuleType("hermes_cli")
+        fake.__file__ = os.path.join(checkout, "hermes_cli", "__init__.py")
+        path = os.pathsep.join([os.path.join(checkout, ".hermes", "bin"), os.path.join(env, "bin"), "/usr/bin", "/bin",
+                                "/opt/elsewhere/bin"])
+        with mock.patch.dict(sys.modules, {"hermes_cli": fake}), mock.patch.object(sys, "prefix", env), \
+                mock.patch.object(sys, "executable", os.path.join(env, "bin", "python")), \
+                mock.patch.dict(os.environ, {"PATH": path, "VIRTUAL_ENV": env, "PYTHONPATH": checkout}):
+            got = runner.contract_env()
+        self.assertEqual(got["PATH"], os.pathsep.join(["/usr/bin", "/bin", "/opt/elsewhere/bin"]))
+        self.assertNotIn("VIRTUAL_ENV", got)
+        self.assertNotIn("PYTHONPATH", got)
+
+    def test_outside_hermes_path_is_left_alone(self):
+        from necro import runner
+        with mock.patch.dict(sys.modules, {"hermes_cli": None}), \
+                mock.patch.dict(os.environ, {"PATH": os.pathsep.join([os.path.dirname(sys.executable), "/usr/bin"])}):
+            self.assertEqual(runner.contract_env()["PATH"], os.environ["PATH"])
+
+
 if __name__ == "__main__":
     unittest.main()

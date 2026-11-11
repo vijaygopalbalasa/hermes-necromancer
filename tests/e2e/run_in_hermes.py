@@ -79,9 +79,12 @@ def text_of(message):
     return ""
 
 
-def chat(hermes, env, project, log, contract):
-    """One `hermes chat -q` turn in ``project`` against the scripted model, which tries to loosen ``contract``."""
+def chat(hermes, env, project, log, contract, path_first=None):
+    """One `hermes chat -q` turn in ``project`` against the scripted model, which tries to loosen ``contract``.
+    ``path_first`` goes first on PATH for that turn, as Hermes's own runtime does in an installed Hermes."""
     refuse_real_home(env["HERMES_HOME"])
+    if path_first:
+        env = {**env, "PATH": os.pathsep.join([path_first, env.get("PATH", "")])}
     model = subprocess.Popen([sys.executable, str(HERE / "scripted_model.py"), "--port", "0", "--log", str(log)],
                              stdout=subprocess.PIPE, text=True, env={**env, "NECRO_E2E_CONTRACT": contract})
     try:
@@ -184,6 +187,14 @@ def main() -> int:
     fresh = tmp / "fresh"
     shutil.copytree(REPO / "demo" / "tip_split", fresh, ignore=shutil.ignore_patterns("necro.toml"))
     (fresh / "contracts").rename(fresh / "tests")
+    # A fifth test fails when a contract runs with Hermes's own Python: inside Hermes its environment's bin comes
+    # first on PATH, and the plugin must run contracts with the person's PATH instead.
+    hermes_bin = os.path.dirname(hermes_python(args.hermes))
+    hermes_prefix = os.path.realpath(os.path.dirname(hermes_bin))
+    (fresh / "tests" / "test_runs_with_your_python.py").write_text(
+        "import os\nimport sys\nimport unittest\n\n\nclass YourPython(unittest.TestCase):\n"
+        "    def test_not_hermes_own_python(self):\n"
+        f"        self.assertFalse(os.path.realpath(sys.prefix).startswith({hermes_prefix!r}), sys.executable)\n")
     script_freeze = run([args.hermes, "necro", "freeze", "--dir", str(fresh)], env, check=False)
     nothing_written = not os.path.lexists(fresh / "necro.toml") and not os.path.lexists(fresh / ".necro")
     print("Zero config, in a fresh project with tests/ and no necro.toml. /necro freeze, as the person types it:")
@@ -191,7 +202,7 @@ def main() -> int:
                 cwd=fresh).stdout.strip()
     print(reply, "\n")
     generated = (fresh / "necro.toml").read_text() if (fresh / "necro.toml").is_file() else ""
-    fresh_turn = chat(args.hermes, env, fresh, tmp / "fresh-requests.jsonl", "tests/test_fair.py")
+    fresh_turn = chat(args.hermes, env, fresh, tmp / "fresh-requests.jsonl", "tests/test_fair.py", path_first=hermes_bin)
     fresh_seen = observe(tmp / "fresh-requests.jsonl", fresh)
     fresh_verify = run([args.hermes, "necro", "verify", "--dir", str(fresh)], env, check=False)
     test_intact = (fresh / "tests" / "test_fair.py").read_bytes() == (REPO / "demo" / "tip_split" / "contracts" / "test_fair.py").read_bytes()
@@ -200,16 +211,16 @@ def main() -> int:
          script_freeze.returncode == 3 and nothing_written),
         ("Zero config: /necro freeze locked the tests, said so plainly and said where they stand",
          reply.startswith("Locked your tests: `python3 -m unittest discover -q -s tests` must pass. Locked files: "
-                          "tests/ (4 files).") and "\nRight now: " in reply and generated.startswith("# Written by /necro freeze")
+                          "tests/ (5 files).") and "\nRight now: " in reply and generated.startswith("# Written by /necro freeze")
          and (fresh / ".necro" / "lock.json").is_file()),
         ("Zero config: Hermes ran the turn (exit code 0)", fresh_turn.returncode == 0),
         ("Zero config: the first 'Done!' was refused with a note naming C1", any("C1" in n for n in fresh_seen["nudges"])),
         ("Zero config: the write_file to the locked test was blocked", bool(fresh_seen["blocked"])),
         ("Zero config: the locked test file is unchanged", test_intact),
-        ("Zero config: the real fix got a receipt in the final reply",
-         bool(fresh_seen["receipts"]) and "all 4 tests pass. Receipt" in fresh_turn.stdout),
+        ("Zero config: the real fix got a receipt, with Hermes's own Python first on PATH",
+         bool(fresh_seen["receipts"]) and "all 5 tests pass. Receipt" in fresh_turn.stdout),
         ("Zero config: the final reply says Hermes was sent back, counting the failing tests",
-         "Sent back once: 2 of 4 tests failed after Hermes said done." in fresh_turn.stdout),
+         "Sent back once: 2 of 5 tests failed after Hermes said done." in fresh_turn.stdout),
         ("Zero config: hermes necro verify says CONFIRMED", "CONFIRMED" in fresh_verify.stdout),
     ]
     print("What the model was told when it first said Done:")
